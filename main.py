@@ -69,6 +69,8 @@ def parse_args():
     p.add_argument("--LAMBDA_KD", type=float, default=0.25)
     p.add_argument("--TEMPERATURE", type=float, default=5.0)
     p.add_argument("--COSINE_TAU", type=float, default=0.25)
+    p.add_argument("--PATIENCE", type=int, default=5,
+                   help="Early stopping patience (epochs without validation UR improvement)")
     default_save_dir = "/content/checkpoints" if os.path.isdir("/content") else "./checkpoints"
     p.add_argument("--SAVE_DIR", type=str, default=default_save_dir)
     p.add_argument("--SEED", type=int, default=42)
