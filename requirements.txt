@@ -1,0 +1,27 @@
+# ==============================================================================
+# MTKD4SER Phase 1 - Project Dependencies
+# ==============================================================================
+
+# Core Deep Learning Framework
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Hugging Face Ecosystem
+transformers>=4.36.0
+datasets>=2.16.0
+accelerate>=0.26.0
+
+# Audio & Signal Processing
+soundfile>=0.12.1
+librosa>=0.10.0
+scipy>=1.10.0
+
+# Data Science & Evaluation Metrics
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.2.0
+
+# Experiment Tracking & Utilities
+tqdm>=4.65.0
+tensorboard>=2.14.0
+pyarrow>=14.0.0

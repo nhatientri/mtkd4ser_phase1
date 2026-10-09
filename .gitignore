@@ -1,0 +1,67 @@
+# ==============================================================================
+# Byte-compiled / optimized / DLL files
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ==============================================================================
+# Large Datasets & Audio Assets
+# (Data directory is >5GB; keep directory structure via data/README.md)
+# ==============================================================================
+data/*
+!data/README.md
+!data/.gitkeep
+
+# Any raw dataset directories or archives
+IEMOCAP_full_release/
+CaFE_48k/
+FESC/
+*.tar.gz
+*.tar
+*.zip
+*.parquet
+
+# ==============================================================================
+# Model Checkpoints & Pretrained Weights
+# ==============================================================================
+checkpoints/
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+
+# ==============================================================================
+# Logs & TensorBoard
+# ==============================================================================
+runs/
+tb/
+*.log
+wandb/
+
+# ==============================================================================
+# Environments & Jupyter Notebooks
+# ==============================================================================
+.env
+.venv
+venv/
+env/
+ENV/
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# ==============================================================================
+# OS & Editor Artifacts
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace

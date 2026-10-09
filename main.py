@@ -1,0 +1,179 @@
+"""
+main.py – Phase 1 entry point (Colab Free friendly)
+
+Example commands
+----------------
+# 1. Fine-tune English monolingual teacher
+python main.py --PARADIGM FT --LANGUAGE EN --LINGUALITY Monolingual \
+    --SESSION 1 --N_EPOCHS 15 --BATCH_SIZE 8 --LEARNING_RATE 3e-5 --TRAINING 1
+
+# 2. Fine-tune French monolingual teacher
+python main.py --PARADIGM FT --LANGUAGE FR --LINGUALITY Monolingual \
+    --SESSION 1 --N_EPOCHS 15 --BATCH_SIZE 8 --LEARNING_RATE 3e-5 --TRAINING 1
+
+# 3. MTKD with oracle language routing (recommended)
+python main.py --PARADIGM MTKD --LANGUAGE EN --LINGUALITY Multilingual \
+    --SESSION 1 --N_EPOCHS 15 --BATCH_SIZE 4 --LEARNING_RATE 3e-5 --TRAINING 1 \
+    --ROUTING language \
+    --TEACHER_EN_CKPT /content/checkpoints/FT_Monolingual_EN_S1.pth \
+    --TEACHER_FR_CKPT /content/checkpoints/FT_Monolingual_FR_S1.pth
+
+# 4. Ablation: cosine (original paper) vs uniform vs language
+python main.py ... --ROUTING cosine
+python main.py ... --ROUTING uniform
+"""
+
+import os
+import random
+import argparse
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from transformers import Wav2Vec2FeatureExtractor, AutoFeatureExtractor
+
+from data import iemocap, cafe, fesc, build_multilingual
+from models import model_ft, model_kd, model_mtkd
+from pipeline import pipeline_ft, pipeline_kd, pipeline_mtkd
+from utils import preprocess_function, collate_fn
+import warnings
+warnings.filterwarnings("ignore")
+
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="MTKD4SER Phase-1")
+    p.add_argument("--N_EPOCHS", type=int, default=15)
+    p.add_argument("--LEARNING_RATE", type=float, default=3e-5)
+    p.add_argument("--BATCH_SIZE", type=int, default=8)
+    p.add_argument("--SESSION", type=int, default=1)
+    p.add_argument("--TRAINING", type=int, default=1, choices=[0, 1])
+    p.add_argument("--PARADIGM", type=str, default="FT",
+                   choices=["FT", "KD", "MTKD"])
+    p.add_argument("--LANGUAGE", type=str, default="EN",
+                   choices=["EN", "FI", "FR"])
+    p.add_argument("--LINGUALITY", type=str, default="Monolingual",
+                   choices=["Monolingual", "Multilingual"])
+    p.add_argument("--BACKBONE", type=str, default="facebook/wav2vec2-base",
+                   help="e.g. facebook/wav2vec2-base | facebook/wav2vec2-xls-r-300m")
+    p.add_argument("--ROUTING", type=str, default="language",
+                   choices=["language", "uniform", "cosine", "confidence"])
+    p.add_argument("--LAMBDA_KD", type=float, default=0.25)
+    p.add_argument("--TEMPERATURE", type=float, default=5.0)
+    p.add_argument("--COSINE_TAU", type=float, default=0.25)
+    default_save_dir = "/content/checkpoints" if os.path.isdir("/content") else "./checkpoints"
+    p.add_argument("--SAVE_DIR", type=str, default=default_save_dir)
+    p.add_argument("--SEED", type=int, default=42)
+    # Teacher checkpoints for KD / MTKD
+    p.add_argument("--TEACHER_CKPT", type=str, default=None,
+                   help="Single teacher for KD")
+    p.add_argument("--TEACHER_EN_CKPT", type=str, default=None)
+    p.add_argument("--TEACHER_FI_CKPT", type=str, default=None)
+    p.add_argument("--TEACHER_FR_CKPT", type=str, default=None)
+    p.add_argument("--INCLUDE_FI", type=int, default=0,
+                   help="1 = try to load FESC in multilingual mode")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    set_seed(args.SEED)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device} | Backbone: {args.BACKBONE} | Routing: {args.ROUTING}")
+
+    # ------------------------------------------------------------------ data
+    if args.LINGUALITY == "Monolingual":
+        if args.LANGUAGE == "EN":
+            label2id, id2label, ds = iemocap(session=args.SESSION)
+        elif args.LANGUAGE == "FR":
+            label2id, id2label, ds = cafe(session=args.SESSION)
+        else:
+            label2id, id2label, ds = fesc(session=args.SESSION)
+    else:
+        label2id, id2label, ds = build_multilingual(
+            session_en=args.SESSION,
+            session_fi=9,
+            session_fr=1,
+            include_fi=bool(args.INCLUDE_FI),
+        )
+
+    print(ds)
+    print("label2id:", label2id)
+
+    # ------------------------------------------------------------------ feature extractor
+    try:
+        feature_extractor = AutoFeatureExtractor.from_pretrained(args.BACKBONE)
+    except Exception:
+        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(args.BACKBONE)
+
+    encoded = ds.map(
+        lambda ex: preprocess_function(ex, feature_extractor),
+        remove_columns=["audio"],
+        batched=True,
+    )
+
+    train_loader = DataLoader(
+        encoded["train"], batch_size=args.BATCH_SIZE, shuffle=True,
+        collate_fn=collate_fn, num_workers=2, pin_memory=True)
+    valid_loader = DataLoader(
+        encoded["dev"], batch_size=args.BATCH_SIZE, shuffle=False,
+        collate_fn=collate_fn, num_workers=2)
+    test_loader = DataLoader(
+        encoded["test"], batch_size=args.BATCH_SIZE, shuffle=False,
+        collate_fn=collate_fn, num_workers=2)
+
+    hyperparam = {
+        "SESSION": args.SESSION,
+        "LEARNING_RATE": args.LEARNING_RATE,
+        "TRAINING": args.TRAINING,
+        "N_EPOCHS": args.N_EPOCHS,
+        "LINGUALITY": args.LINGUALITY,
+        "LANGUAGE": args.LANGUAGE,
+        "SAVE_DIR": args.SAVE_DIR,
+        "PATIENCE": args.PATIENCE,
+        "TEMPERATURE": args.TEMPERATURE,
+        "LAMBDA_KD": args.LAMBDA_KD,
+        "ROUTING": args.ROUTING,
+        "COSINE_TAU": args.COSINE_TAU,
+    }
+
+    num_classes = len(label2id)
+
+    # ------------------------------------------------------------------ models & run
+    if args.PARADIGM == "FT":
+        model = model_ft(label2id, id2label, num_classes, device, args.BACKBONE)
+        pipeline_ft(model, train_loader, valid_loader, test_loader,
+                    hyperparam, device)
+
+    elif args.PARADIGM == "KD":
+        teacher, student = model_kd(
+            label2id, id2label, num_classes, device,
+            backbone=args.BACKBONE,
+            teacher_ckpt=args.TEACHER_CKPT,
+        )
+        pipeline_kd(teacher, student, train_loader, valid_loader, test_loader,
+                    hyperparam, device)
+
+    else:  # MTKD
+        teachers, student = model_mtkd(
+            label2id, id2label, num_classes, device,
+            backbone=args.BACKBONE,
+            teacher_en_ckpt=args.TEACHER_EN_CKPT,
+            teacher_fi_ckpt=args.TEACHER_FI_CKPT,
+            teacher_fr_ckpt=args.TEACHER_FR_CKPT,
+        )
+        pipeline_mtkd(teachers, student, train_loader, valid_loader, test_loader,
+                      hyperparam, device)
+
+
+if __name__ == "__main__":
+    main()
