@@ -98,12 +98,20 @@ python reformat_datasets.py \
     --out_dir ./data
 ```
 
-### Export to Hugging Face Arrow (Recommended for Fast Training)
+### Export to Hugging Face Arrow (Local Zero-Copy)
 ```bash
 python export_to_hf_dataset.py \
     --data_dir ./data \
     --out_dir ./data/hf_datasets
 ```
+
+### Push to Hugging Face Hub (Cloud-Native Workflow)
+To bypass Google Drive archives entirely and stream data directly to Colab:
+```bash
+# Upload local Arrow datasets to your private Hugging Face repo
+python upload_to_hf.py --repo_id <your-hf-username>/mtkd4ser-phase1
+```
+Then simply pass `--HF_DATASET_REPO <your-hf-username>/mtkd4ser-phase1` to any training command!
 
 ---
 

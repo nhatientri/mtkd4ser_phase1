@@ -82,12 +82,17 @@ def parse_args():
     p.add_argument("--TEACHER_FR_CKPT", type=str, default=None)
     p.add_argument("--INCLUDE_FI", type=int, default=0,
                    help="1 = try to load FESC in multilingual mode")
+    p.add_argument("--HF_DATASET_REPO", type=str, default=None,
+                   help="Optional Hugging Face dataset repository (e.g. username/mtkd4ser-phase1)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     set_seed(args.SEED)
+
+    if args.HF_DATASET_REPO:
+        os.environ["HF_DATASET_REPO"] = args.HF_DATASET_REPO
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device} | Backbone: {args.BACKBONE} | Routing: {args.ROUTING}")

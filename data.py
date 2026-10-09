@@ -10,7 +10,7 @@ import os
 import json
 import glob
 import pandas as pd
-from datasets import Dataset, DatasetDict, Audio, concatenate_datasets, load_from_disk
+from datasets import Dataset, DatasetDict, Audio, concatenate_datasets, load_from_disk, load_dataset
 from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings("ignore")
@@ -24,10 +24,12 @@ from utils import (
 
 
 # ---------------------------------------------------------------------------
-# Default roots – auto-detects local preprocessed data or Colab defaults
+# Default roots – auto-detects local preprocessed data, HF Hub repo, or Colab defaults
 # ---------------------------------------------------------------------------
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR    = os.path.join(_PROJECT_DIR, "data")
+
+HF_DATASET_REPO = os.environ.get("HF_DATASET_REPO", None)
 
 IEMOCAP_ROOT = os.environ.get(
     "IEMOCAP_ROOT",
@@ -75,6 +77,10 @@ def iemocap(session=1, root=None, create_dev=True, dev_ratio=0.1, seed=42):
         if os.path.isdir(hf_p):
             print(f"[INFO] Loading IEMOCAP session {session} from HF Arrow: {hf_p}")
             return label2id, id2label, load_from_disk(hf_p)
+
+    if HF_DATASET_REPO:
+        print(f"[INFO] Loading IEMOCAP session {session} from HF Hub: {HF_DATASET_REPO}")
+        return label2id, id2label, load_dataset(HF_DATASET_REPO, f"iemocap_session{session}")
     # Expect pre-built json splits (same format as original paper)
     # Fallback: try common Kaggle layout
     train_json = f"{root}/session{session}/train.json"
@@ -167,6 +173,10 @@ def cafe(session=1, root=None, create_dev=True, dev_ratio=0.15, seed=42):
         if os.path.isdir(hf_p):
             print(f"[INFO] Loading CaFE from HF Arrow: {hf_p}")
             return label2id, id2label, load_from_disk(hf_p)
+
+    if HF_DATASET_REPO:
+        print(f"[INFO] Loading CaFE from HF Hub: {HF_DATASET_REPO}")
+        return label2id, id2label, load_dataset(HF_DATASET_REPO, "cafe")
 
     splits_dir = os.path.join(root, "CaFE_splits")
     if not os.path.isdir(splits_dir):
@@ -307,9 +317,13 @@ def build_multilingual(session_en=1, session_fi=9, session_fr=1,
     """
     label2id, id2label = _make_label_maps()
     hf_comb = os.path.join(_DATA_DIR, "hf_datasets", "combined")
-    if session_en == 1 and session_fr == 1 and os.path.isdir(hf_comb) and not include_fi:
-        print(f"[INFO] Loading Combined Multilingual (EN Session 1 + FR Fold 1) from HF Arrow: {hf_comb}")
-        return label2id, id2label, load_from_disk(hf_comb)
+    if session_en == 1 and session_fr == 1 and not include_fi:
+        if os.path.isdir(hf_comb):
+            print(f"[INFO] Loading Combined Multilingual (EN Session 1 + FR Fold 1) from HF Arrow: {hf_comb}")
+            return label2id, id2label, load_from_disk(hf_comb)
+        elif HF_DATASET_REPO:
+            print(f"[INFO] Loading Combined Multilingual from HF Hub: {HF_DATASET_REPO}")
+            return label2id, id2label, load_dataset(HF_DATASET_REPO, "combined")
 
     label2id, id2label, ds_en = iemocap(session=session_en)
     _, _, ds_fr = cafe(session=session_fr)

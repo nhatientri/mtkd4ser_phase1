@@ -53,3 +53,20 @@ If you packaged `data` as `data_ser_phase1.tar.gz` on Google Drive:
 tar -xzf /content/drive/MyDrive/data_ser_phase1.tar.gz -C ./
 ```
 The codebase will auto-detect `./data/hf_datasets` and load in under 0.2 seconds!
+
+### Option 3: Hugging Face Hub (Cloud Native - No Google Drive needed!)
+1. Upload local Arrow datasets to your private Hugging Face repo:
+   ```bash
+   python upload_to_hf.py --repo_id <your-hf-username>/mtkd4ser-phase1
+   ```
+2. In Google Colab or on any machine, simply run:
+   ```bash
+   python main.py ... --HF_DATASET_REPO <your-hf-username>/mtkd4ser-phase1
+   ```
+   Or pre-cache to local disk in Colab in ~20 seconds:
+   ```python
+   from datasets import load_dataset
+   for cfg in ["combined", "iemocap_session1", "cafe"]:
+       ds = load_dataset("<your-hf-username>/mtkd4ser-phase1", cfg)
+       ds.save_to_disk(f"data/hf_datasets/{cfg}")
+   ```
