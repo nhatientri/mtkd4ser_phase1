@@ -379,8 +379,9 @@ def train_mtkd(
     avg_w = (weight_sum / n).cpu().tolist()
     weight_str = "  ".join([f"{lang_keys[i].upper()}={avg_w[i]:.3f}" for i in range(num_teachers)])
     print(f"  [routing={routing_mode}] avg weights  {weight_str}")
+    avg_w_dict = {f"weight_{lang_keys[i]}": avg_w[i] for i in range(num_teachers)}
 
-    return ur, wr, acc, total_loss / n, total_kl / n, total_ce / n
+    return ur, wr, acc, total_loss / n, total_kl / n, total_ce / n, avg_w_dict
 
 
 @torch.no_grad()
@@ -447,5 +448,6 @@ def eval_mtkd(
     avg_w = (weight_sum / n).cpu().tolist()
     weight_str = "  ".join([f"{lang_keys[i].upper()}={avg_w[i]:.3f}" for i in range(num_teachers)])
     print(f"  [val routing={routing_mode}] avg weights  {weight_str}")
+    avg_w_dict = {f"weight_{lang_keys[i]}": avg_w[i] for i in range(num_teachers)}
 
-    return ur, wr, acc, total_loss / n, total_kl / n, total_ce / n, all_true, all_pred
+    return ur, wr, acc, total_loss / n, total_kl / n, total_ce / n, all_true, all_pred, avg_w_dict

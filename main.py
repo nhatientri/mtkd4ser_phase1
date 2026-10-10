@@ -84,6 +84,17 @@ def parse_args():
                    help="1 = try to load FESC in multilingual mode")
     p.add_argument("--HF_DATASET_REPO", type=str, default=None,
                    help="Optional Hugging Face dataset repository (e.g. username/mtkd4ser-phase1)")
+    # Weights & Biases experiment tracking
+    p.add_argument("--USE_WANDB", type=int, default=0, choices=[0, 1],
+                   help="1 = enable Weights & Biases experiment tracking")
+    p.add_argument("--WANDB_PROJECT", type=str, default="mtkd4ser-phase1",
+                   help="Weights & Biases project name")
+    p.add_argument("--WANDB_ENTITY", type=str, default=None,
+                   help="Weights & Biases team/entity name")
+    p.add_argument("--WANDB_NAME", type=str, default=None,
+                   help="Custom run name for Weights & Biases")
+    p.add_argument("--WANDB_LOG_MODEL", type=int, default=1, choices=[0, 1],
+                   help="1 = upload best checkpoint as a W&B Artifact")
     return p.parse_args()
 
 
@@ -139,18 +150,31 @@ def main():
         collate_fn=collate_fn, num_workers=2)
 
     hyperparam = {
+        "PARADIGM": args.PARADIGM,
         "SESSION": args.SESSION,
         "LEARNING_RATE": args.LEARNING_RATE,
+        "BATCH_SIZE": args.BATCH_SIZE,
         "TRAINING": args.TRAINING,
         "N_EPOCHS": args.N_EPOCHS,
         "LINGUALITY": args.LINGUALITY,
         "LANGUAGE": args.LANGUAGE,
+        "BACKBONE": args.BACKBONE,
         "SAVE_DIR": args.SAVE_DIR,
         "PATIENCE": args.PATIENCE,
         "TEMPERATURE": args.TEMPERATURE,
         "LAMBDA_KD": args.LAMBDA_KD,
         "ROUTING": args.ROUTING,
         "COSINE_TAU": args.COSINE_TAU,
+        "USE_WANDB": args.USE_WANDB,
+        "WANDB_PROJECT": args.WANDB_PROJECT,
+        "WANDB_ENTITY": args.WANDB_ENTITY,
+        "WANDB_NAME": args.WANDB_NAME,
+        "WANDB_LOG_MODEL": args.WANDB_LOG_MODEL,
+        "label_names": [id2label[i] for i in range(len(id2label))],
+        "TEACHER_CKPT": args.TEACHER_CKPT,
+        "TEACHER_EN_CKPT": args.TEACHER_EN_CKPT,
+        "TEACHER_FI_CKPT": args.TEACHER_FI_CKPT,
+        "TEACHER_FR_CKPT": args.TEACHER_FR_CKPT,
     }
 
     num_classes = len(label2id)

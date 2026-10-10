@@ -21,3 +21,4 @@ dependencies:
       - tqdm>=4.65.0
       - tensorboard>=2.14.0
       - pyarrow>=14.0.0
+      - wandb>=0.16.0
