@@ -149,6 +149,9 @@ def main():
         encoded["test"], batch_size=args.BATCH_SIZE, shuffle=False,
         collate_fn=collate_fn, num_workers=2)
 
+    num_classes = len(label2id)
+    label_names = [id2label[i] for i in range(num_classes)]
+
     hyperparam = {
         "PARADIGM": args.PARADIGM,
         "SESSION": args.SESSION,
@@ -170,14 +173,12 @@ def main():
         "WANDB_ENTITY": args.WANDB_ENTITY,
         "WANDB_NAME": args.WANDB_NAME,
         "WANDB_LOG_MODEL": args.WANDB_LOG_MODEL,
-        "label_names": [id2label[i] for i in range(len(id2label))],
+        "label_names": label_names,
         "TEACHER_CKPT": args.TEACHER_CKPT,
         "TEACHER_EN_CKPT": args.TEACHER_EN_CKPT,
         "TEACHER_FI_CKPT": args.TEACHER_FI_CKPT,
         "TEACHER_FR_CKPT": args.TEACHER_FR_CKPT,
     }
-
-    num_classes = len(label2id)
 
     # ------------------------------------------------------------------ models & run
     if args.PARADIGM == "FT":

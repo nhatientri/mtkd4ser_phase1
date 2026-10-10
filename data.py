@@ -46,8 +46,8 @@ FESC_ROOT = os.environ.get(
 
 
 LABELS = ["anger", "happiness", "neutral", "sadness"]
-LABEL2ID = {l: str(i) for i, l in enumerate(LABELS)}
-ID2LABEL = {str(i): l for i, l in enumerate(LABELS)}
+LABEL2ID = {l: i for i, l in enumerate(LABELS)}
+ID2LABEL = {i: l for i, l in enumerate(LABELS)}
 
 
 def _make_label_maps():

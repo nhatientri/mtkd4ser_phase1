@@ -62,5 +62,6 @@ ehthumbs.db
 Thumbs.db
 .vscode/
 .idea/
+pyrefly.toml
 *.sublime-project
 *.sublime-workspace
