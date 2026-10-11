@@ -59,6 +59,28 @@ def _get_hf_repo(hf_repo_arg=None):
     return hf_repo_arg or os.environ.get("HF_DATASET_REPO", None) or HF_DATASET_REPO
 
 
+def _load_local_hf_dir(path: str) -> DatasetDict | None:
+    if not os.path.isdir(path):
+        return None
+    if os.path.isfile(os.path.join(path, "dataset_info.json")):
+        return cast(DatasetDict, load_from_disk(path))
+    try:
+        return cast(DatasetDict, load_dataset(path))
+    except Exception:
+        try:
+            return cast(DatasetDict, load_from_disk(path))
+        except Exception:
+            return None
+
+
+def _load_hf_hub_dataset(repo_id: str, config_name: str) -> DatasetDict:
+    token = os.environ.get("HF_TOKEN", None)
+    try:
+        return cast(DatasetDict, load_dataset(repo_id, config_name, token=token))
+    except TypeError:
+        return cast(DatasetDict, load_dataset(repo_id, config_name, use_auth_token=token))
+
+
 # ---------------------------------------------------------------------------
 # IEMOCAP
 # ---------------------------------------------------------------------------
@@ -81,14 +103,15 @@ def iemocap(
         os.path.join(os.path.dirname(root), "hf_datasets", f"iemocap_session{session}"),
     ]
     for hf_p in hf_candidates:
-        if os.path.isdir(hf_p):
-            print(f"[INFO] Loading IEMOCAP session {session} from HF Arrow: {hf_p}")
-            return label2id, id2label, cast(DatasetDict, load_from_disk(hf_p))
+        ds_local = _load_local_hf_dir(hf_p)
+        if ds_local is not None:
+            print(f"[INFO] Loading IEMOCAP session {session} from local path: {hf_p}")
+            return label2id, id2label, ds_local
 
     hf_repo = _get_hf_repo(hf_dataset_repo)
     if hf_repo:
         print(f"[INFO] Loading IEMOCAP session {session} from HF Hub: {hf_repo}")
-        return label2id, id2label, cast(DatasetDict, load_dataset(hf_repo, f"iemocap_session{session}"))
+        return label2id, id2label, _load_hf_hub_dataset(hf_repo, f"iemocap_session{session}")
     # Expect pre-built json splits (same format as original paper)
     # Fallback: try common Kaggle layout
     train_json = f"{root}/session{session}/train.json"
@@ -180,14 +203,15 @@ def cafe(
         os.path.join(os.path.dirname(root), "hf_datasets", "cafe"),
     ]
     for hf_p in hf_candidates:
-        if os.path.isdir(hf_p):
-            print(f"[INFO] Loading CaFE from HF Arrow: {hf_p}")
-            return label2id, id2label, cast(DatasetDict, load_from_disk(hf_p))
+        ds_local = _load_local_hf_dir(hf_p)
+        if ds_local is not None:
+            print(f"[INFO] Loading CaFE from local path: {hf_p}")
+            return label2id, id2label, ds_local
 
     hf_repo = _get_hf_repo(hf_dataset_repo)
     if hf_repo:
         print(f"[INFO] Loading CaFE from HF Hub: {hf_repo}")
-        return label2id, id2label, cast(DatasetDict, load_dataset(hf_repo, "cafe"))
+        return label2id, id2label, _load_hf_hub_dataset(hf_repo, "cafe")
 
     splits_dir = os.path.join(root, "CaFE_splits")
     if not os.path.isdir(splits_dir):
@@ -331,12 +355,13 @@ def build_multilingual(
     hf_repo = _get_hf_repo(hf_dataset_repo)
     hf_comb = os.path.join(_DATA_DIR, "hf_datasets", "combined")
     if session_en == 1 and session_fr == 1 and not include_fi:
-        if os.path.isdir(hf_comb):
-            print(f"[INFO] Loading Combined Multilingual (EN Session 1 + FR Fold 1) from HF Arrow: {hf_comb}")
-            return label2id, id2label, cast(DatasetDict, load_from_disk(hf_comb))
+        ds_local = _load_local_hf_dir(hf_comb)
+        if ds_local is not None:
+            print(f"[INFO] Loading Combined Multilingual (EN Session 1 + FR Fold 1) from local path: {hf_comb}")
+            return label2id, id2label, ds_local
         elif hf_repo:
             print(f"[INFO] Loading Combined Multilingual from HF Hub: {hf_repo}")
-            return label2id, id2label, cast(DatasetDict, load_dataset(hf_repo, "combined"))
+            return label2id, id2label, _load_hf_hub_dataset(hf_repo, "combined")
 
     label2id, id2label, ds_en = iemocap(session=session_en, hf_dataset_repo=hf_repo)
     _, _, ds_fr = cafe(session=session_fr, hf_dataset_repo=hf_repo)
