@@ -116,9 +116,9 @@ def main():
     # ------------------------------------------------------------------ data
     if args.LINGUALITY == "Monolingual":
         if args.LANGUAGE == "EN":
-            label2id, id2label, ds = iemocap(session=args.SESSION)
+            label2id, id2label, ds = iemocap(session=args.SESSION, hf_dataset_repo=args.HF_DATASET_REPO)
         elif args.LANGUAGE == "FR":
-            label2id, id2label, ds = cafe(session=args.SESSION)
+            label2id, id2label, ds = cafe(session=args.SESSION, hf_dataset_repo=args.HF_DATASET_REPO)
         else:
             label2id, id2label, ds = fesc(session=args.SESSION)
     else:
@@ -127,6 +127,7 @@ def main():
             session_fi=9,
             session_fr=1,
             include_fi=bool(args.INCLUDE_FI),
+            hf_dataset_repo=args.HF_DATASET_REPO,
         )
 
     print(ds)

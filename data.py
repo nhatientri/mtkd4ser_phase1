@@ -55,12 +55,16 @@ def _make_label_maps():
     return LABEL2ID.copy(), ID2LABEL.copy()
 
 
+def _get_hf_repo(hf_repo_arg=None):
+    return hf_repo_arg or os.environ.get("HF_DATASET_REPO", None) or HF_DATASET_REPO
+
+
 # ---------------------------------------------------------------------------
 # IEMOCAP
 # ---------------------------------------------------------------------------
 
 def iemocap(
-    session=1, root=None, create_dev=True, dev_ratio=0.1, seed=42
+    session=1, root=None, create_dev=True, dev_ratio=0.1, seed=42, hf_dataset_repo=None
 ) -> tuple[dict[str, int], dict[int, str], DatasetDict]:
     """
     Load one IEMOCAP session (leave-one-session-out style).
@@ -81,9 +85,10 @@ def iemocap(
             print(f"[INFO] Loading IEMOCAP session {session} from HF Arrow: {hf_p}")
             return label2id, id2label, cast(DatasetDict, load_from_disk(hf_p))
 
-    if HF_DATASET_REPO:
-        print(f"[INFO] Loading IEMOCAP session {session} from HF Hub: {HF_DATASET_REPO}")
-        return label2id, id2label, cast(DatasetDict, load_dataset(HF_DATASET_REPO, f"iemocap_session{session}"))
+    hf_repo = _get_hf_repo(hf_dataset_repo)
+    if hf_repo:
+        print(f"[INFO] Loading IEMOCAP session {session} from HF Hub: {hf_repo}")
+        return label2id, id2label, cast(DatasetDict, load_dataset(hf_repo, f"iemocap_session{session}"))
     # Expect pre-built json splits (same format as original paper)
     # Fallback: try common Kaggle layout
     train_json = f"{root}/session{session}/train.json"
@@ -158,7 +163,7 @@ def iemocap(
 # ---------------------------------------------------------------------------
 
 def cafe(
-    session=1, root=None, create_dev=True, dev_ratio=0.15, seed=42
+    session=1, root=None, create_dev=True, dev_ratio=0.15, seed=42, hf_dataset_repo=None
 ) -> tuple[dict[str, int], dict[int, str], DatasetDict]:
     """
     Load CaFE (Canadian French).
@@ -179,9 +184,10 @@ def cafe(
             print(f"[INFO] Loading CaFE from HF Arrow: {hf_p}")
             return label2id, id2label, cast(DatasetDict, load_from_disk(hf_p))
 
-    if HF_DATASET_REPO:
-        print(f"[INFO] Loading CaFE from HF Hub: {HF_DATASET_REPO}")
-        return label2id, id2label, cast(DatasetDict, load_dataset(HF_DATASET_REPO, "cafe"))
+    hf_repo = _get_hf_repo(hf_dataset_repo)
+    if hf_repo:
+        print(f"[INFO] Loading CaFE from HF Hub: {hf_repo}")
+        return label2id, id2label, cast(DatasetDict, load_dataset(hf_repo, "cafe"))
 
     splits_dir = os.path.join(root, "CaFE_splits")
     if not os.path.isdir(splits_dir):
@@ -315,24 +321,25 @@ def fesc(session=9, root=None) -> tuple[dict[str, int], dict[int, str], DatasetD
 # ---------------------------------------------------------------------------
 
 def build_multilingual(
-    session_en=1, session_fi=9, session_fr=1, include_fi=False
+    session_en=1, session_fi=9, session_fr=1, include_fi=False, hf_dataset_repo=None
 ) -> tuple[dict[str, int], dict[int, str], DatasetDict]:
     """
     Concatenate EN (+ optional FI) + FR.
     Uses pre-built combined HF Arrow dataset if available for Session 1.
     """
     label2id, id2label = _make_label_maps()
+    hf_repo = _get_hf_repo(hf_dataset_repo)
     hf_comb = os.path.join(_DATA_DIR, "hf_datasets", "combined")
     if session_en == 1 and session_fr == 1 and not include_fi:
         if os.path.isdir(hf_comb):
             print(f"[INFO] Loading Combined Multilingual (EN Session 1 + FR Fold 1) from HF Arrow: {hf_comb}")
             return label2id, id2label, cast(DatasetDict, load_from_disk(hf_comb))
-        elif HF_DATASET_REPO:
-            print(f"[INFO] Loading Combined Multilingual from HF Hub: {HF_DATASET_REPO}")
-            return label2id, id2label, cast(DatasetDict, load_dataset(HF_DATASET_REPO, "combined"))
+        elif hf_repo:
+            print(f"[INFO] Loading Combined Multilingual from HF Hub: {hf_repo}")
+            return label2id, id2label, cast(DatasetDict, load_dataset(hf_repo, "combined"))
 
-    label2id, id2label, ds_en = iemocap(session=session_en)
-    _, _, ds_fr = cafe(session=session_fr)
+    label2id, id2label, ds_en = iemocap(session=session_en, hf_dataset_repo=hf_repo)
+    _, _, ds_fr = cafe(session=session_fr, hf_dataset_repo=hf_repo)
 
     datasets: list[DatasetDict] = [ds_en, ds_fr]
     if include_fi:
