@@ -27,8 +27,9 @@ import os
 import random
 import argparse
 import numpy as np
+from typing import cast
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset as TorchDataset
 from transformers import Wav2Vec2FeatureExtractor, AutoFeatureExtractor
 
 from data import iemocap, cafe, fesc, build_multilingual
@@ -93,8 +94,12 @@ def parse_args():
                    help="Weights & Biases team/entity name")
     p.add_argument("--WANDB_NAME", type=str, default=None,
                    help="Custom run name for Weights & Biases")
+    p.add_argument("--WANDB_RUN_ID", type=str, default=None,
+                   help="Existing Weights & Biases Run ID to resume logging into the same dashboard run")
     p.add_argument("--WANDB_LOG_MODEL", type=int, default=1, choices=[0, 1],
                    help="1 = upload best checkpoint as a W&B Artifact")
+    p.add_argument("--RESUME_CKPT", type=str, default=None,
+                   help="Path or W&B Artifact URI (e.g. 'entity/project/name:latest') to resume from")
     return p.parse_args()
 
 
@@ -140,13 +145,13 @@ def main():
     )
 
     train_loader = DataLoader(
-        encoded["train"], batch_size=args.BATCH_SIZE, shuffle=True,
+        cast(TorchDataset, encoded["train"]), batch_size=args.BATCH_SIZE, shuffle=True,
         collate_fn=collate_fn, num_workers=2, pin_memory=True)
     valid_loader = DataLoader(
-        encoded["dev"], batch_size=args.BATCH_SIZE, shuffle=False,
+        cast(TorchDataset, encoded["dev"]), batch_size=args.BATCH_SIZE, shuffle=False,
         collate_fn=collate_fn, num_workers=2)
     test_loader = DataLoader(
-        encoded["test"], batch_size=args.BATCH_SIZE, shuffle=False,
+        cast(TorchDataset, encoded["test"]), batch_size=args.BATCH_SIZE, shuffle=False,
         collate_fn=collate_fn, num_workers=2)
 
     num_classes = len(label2id)
@@ -172,7 +177,9 @@ def main():
         "WANDB_PROJECT": args.WANDB_PROJECT,
         "WANDB_ENTITY": args.WANDB_ENTITY,
         "WANDB_NAME": args.WANDB_NAME,
+        "WANDB_RUN_ID": args.WANDB_RUN_ID,
         "WANDB_LOG_MODEL": args.WANDB_LOG_MODEL,
+        "RESUME_CKPT": args.RESUME_CKPT,
         "label_names": label_names,
         "TEACHER_CKPT": args.TEACHER_CKPT,
         "TEACHER_EN_CKPT": args.TEACHER_EN_CKPT,
@@ -181,6 +188,17 @@ def main():
     }
 
     # ------------------------------------------------------------------ models & run
+    from pipeline import resolve_checkpoint
+
+    teacher_ckpt = resolve_checkpoint(args.TEACHER_CKPT, save_dir=args.SAVE_DIR,
+                                      default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
+    teacher_en_ckpt = resolve_checkpoint(args.TEACHER_EN_CKPT, save_dir=args.SAVE_DIR,
+                                         default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
+    teacher_fi_ckpt = resolve_checkpoint(args.TEACHER_FI_CKPT, save_dir=args.SAVE_DIR,
+                                         default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
+    teacher_fr_ckpt = resolve_checkpoint(args.TEACHER_FR_CKPT, save_dir=args.SAVE_DIR,
+                                         default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
+
     if args.PARADIGM == "FT":
         model = model_ft(label2id, id2label, num_classes, device, args.BACKBONE)
         pipeline_ft(model, train_loader, valid_loader, test_loader,
@@ -190,7 +208,7 @@ def main():
         teacher, student = model_kd(
             label2id, id2label, num_classes, device,
             backbone=args.BACKBONE,
-            teacher_ckpt=args.TEACHER_CKPT,
+            teacher_ckpt=teacher_ckpt,
         )
         pipeline_kd(teacher, student, train_loader, valid_loader, test_loader,
                     hyperparam, device)
@@ -199,9 +217,9 @@ def main():
         teachers, student = model_mtkd(
             label2id, id2label, num_classes, device,
             backbone=args.BACKBONE,
-            teacher_en_ckpt=args.TEACHER_EN_CKPT,
-            teacher_fi_ckpt=args.TEACHER_FI_CKPT,
-            teacher_fr_ckpt=args.TEACHER_FR_CKPT,
+            teacher_en_ckpt=teacher_en_ckpt,
+            teacher_fi_ckpt=teacher_fi_ckpt,
+            teacher_fr_ckpt=teacher_fr_ckpt,
         )
         pipeline_mtkd(teachers, student, train_loader, valid_loader, test_loader,
                       hyperparam, device)

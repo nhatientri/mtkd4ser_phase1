@@ -8,6 +8,7 @@ pipeline.py – Phase 1
 """
 
 import os
+from typing import Any
 import torch
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
@@ -37,6 +38,8 @@ def _init_wandb(hyperparam, default_name):
     try:
         import wandb
         run_name = hyperparam.get("WANDB_NAME") or default_name
+        run_id = hyperparam.get("WANDB_RUN_ID") or None
+        resume_mode = "allow" if run_id else None
         # Keep config clean and serializable
         clean_config = {
             k: v for k, v in hyperparam.items()
@@ -46,6 +49,8 @@ def _init_wandb(hyperparam, default_name):
             project=hyperparam.get("WANDB_PROJECT", "mtkd4ser-phase1"),
             entity=hyperparam.get("WANDB_ENTITY") or None,
             name=run_name,
+            id=run_id,
+            resume=resume_mode,
             config=clean_config,
             reinit=True,
         )
@@ -57,6 +62,83 @@ def _init_wandb(hyperparam, default_name):
     except Exception as e:
         print(f"[W&B Warning] Failed to initialize W&B ({e}). Continuing with TensorBoard only.")
         return False, None
+
+
+def resolve_checkpoint(path_or_artifact, save_dir="/content/checkpoints",
+                       wandb_run=None, default_project="mtkd4ser-phase1",
+                       default_entity=None):
+    """
+    Resolves a checkpoint path. If path_or_artifact is:
+    1. A local file: returns it directly.
+    2. A W&B Artifact URI (e.g. 'entity/project/name:alias', 'name:alias', or 'wandb://...'):
+       downloads it via W&B, links it to wandb_run (for lineage tracking), and returns local .pth file path.
+    """
+    if not path_or_artifact:
+        return None
+
+    if os.path.isfile(path_or_artifact):
+        return path_or_artifact
+
+    clean_ref = str(path_or_artifact).replace("wandb://", "").strip()
+
+    if ":" in clean_ref or "/" in clean_ref or not os.path.exists(clean_ref):
+        try:
+            import wandb
+            parts = clean_ref.split("/")
+            if len(parts) == 1:
+                full_ref = f"{default_entity}/{default_project}/{clean_ref}" if default_entity else f"{default_project}/{clean_ref}"
+            elif len(parts) == 2:
+                full_ref = f"{default_entity}/{clean_ref}" if default_entity else clean_ref
+            else:
+                full_ref = clean_ref
+
+            artifact = None
+            if wandb_run is not None:
+                try:
+                    artifact = wandb_run.use_artifact(full_ref, type="model")
+                    print(f"  ✓ Linked W&B input artifact: {full_ref}")
+                except Exception:
+                    artifact = wandb_run.use_artifact(clean_ref, type="model")
+                    print(f"  ✓ Linked W&B input artifact: {clean_ref}")
+            else:
+                api = wandb.Api()
+                try:
+                    artifact = api.artifact(full_ref, type="model")
+                except Exception:
+                    artifact = api.artifact(clean_ref, type="model")
+
+            if artifact is not None:
+                _ensure_dir(save_dir)
+                download_dir = artifact.download(root=save_dir)
+                if os.path.isdir(download_dir):
+                    for fname in sorted(os.listdir(download_dir)):
+                        if fname.endswith(".pth"):
+                            pth_file = os.path.join(download_dir, fname)
+                            print(f"  ✓ Downloaded W&B checkpoint: {pth_file}")
+                            return pth_file
+                elif os.path.isfile(download_dir):
+                    return download_dir
+        except Exception as e:
+            print(f"[W&B Warning] Could not resolve artifact '{clean_ref}': {e}")
+
+    return path_or_artifact
+
+
+def _track_teacher_artifacts(run, hyperparam):
+    """Register teacher artifacts in W&B so they appear in the project lineage graph."""
+    if not run:
+        return
+    teacher_keys = ["TEACHER_CKPT", "TEACHER_EN_CKPT", "TEACHER_FI_CKPT", "TEACHER_FR_CKPT"]
+    for k in teacher_keys:
+        val = hyperparam.get(k)
+        if val:
+            resolve_checkpoint(
+                val,
+                save_dir=hyperparam.get("SAVE_DIR", "/content/checkpoints"),
+                wandb_run=run,
+                default_project=hyperparam.get("WANDB_PROJECT", "mtkd4ser-phase1"),
+                default_entity=hyperparam.get("WANDB_ENTITY"),
+            )
 
 
 def _save_wandb_artifact(run, ckpt_path, run_name, epoch, best_ur, paradigm):
@@ -85,7 +167,7 @@ def _log_test_wandb(run, ur, wr, acc, loss, y_true, y_pred, label_names=None):
     """Log final test evaluation metrics and confusion matrix to W&B."""
     try:
         import wandb
-        test_metrics = {
+        test_metrics: dict[str, Any] = {
             "test/UR": float(ur),
             "test/WR": float(wr),
             "test/acc": float(acc),
@@ -138,13 +220,24 @@ def pipeline_ft(model, train_loader, valid_loader, test_loader,
     best_ur = -1.0
     epochs_no_improve = 0
 
-    if os.path.isfile(ckpt_path) and training:
-        ckpt = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        start_epoch = ckpt.get("epoch", 1) + 1
-        best_ur = ckpt.get("best_ur", -1.0)
-        print(f"[FT] Resumed from epoch {start_epoch-1}, best_ur={best_ur:.4f}")
+    resume_target = hyperparam.get("RESUME_CKPT") or (ckpt_path if os.path.isfile(ckpt_path) else None)
+    if resume_target:
+        resolved_ckpt = resolve_checkpoint(
+            resume_target, save_dir=save_dir, wandb_run=wandb_run,
+            default_project=hyperparam.get("WANDB_PROJECT", "mtkd4ser-phase1"),
+            default_entity=hyperparam.get("WANDB_ENTITY"),
+        )
+        if resolved_ckpt and os.path.isfile(resolved_ckpt):
+            ckpt = torch.load(resolved_ckpt, map_location=device)
+            model.load_state_dict(ckpt["model_state_dict"])
+            if training and "optimizer_state_dict" in ckpt:
+                try:
+                    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"[FT Warning] Could not restore optimizer state: {e}")
+            start_epoch = ckpt.get("epoch", 1) + 1
+            best_ur = ckpt.get("best_ur", -1.0)
+            print(f"[FT] Loaded checkpoint {resolved_ckpt} (epoch {start_epoch-1}, best_ur={best_ur:.4f})")
 
     if not training:
         ur, wr, acc, loss, y_true, y_pred = eval_ft(
@@ -250,18 +343,30 @@ def pipeline_kd(teacher, student, train_loader, valid_loader, test_loader,
 
     writer = SummaryWriter(log_dir=os.path.join(save_dir, "tb", default_name))
     use_wandb, wandb_run = _init_wandb(hyperparam, default_name)
+    _track_teacher_artifacts(wandb_run, hyperparam)
 
     start_epoch = 1
     best_ur = -1.0
     epochs_no_improve = 0
 
-    if os.path.isfile(ckpt_path) and training:
-        ckpt = torch.load(ckpt_path, map_location=device)
-        student.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        start_epoch = ckpt.get("epoch", 1) + 1
-        best_ur = ckpt.get("best_ur", -1.0)
-        print(f"[KD] Resumed from epoch {start_epoch-1}")
+    resume_target = hyperparam.get("RESUME_CKPT") or (ckpt_path if os.path.isfile(ckpt_path) else None)
+    if resume_target:
+        resolved_ckpt = resolve_checkpoint(
+            resume_target, save_dir=save_dir, wandb_run=wandb_run,
+            default_project=hyperparam.get("WANDB_PROJECT", "mtkd4ser-phase1"),
+            default_entity=hyperparam.get("WANDB_ENTITY"),
+        )
+        if resolved_ckpt and os.path.isfile(resolved_ckpt):
+            ckpt = torch.load(resolved_ckpt, map_location=device)
+            student.load_state_dict(ckpt["model_state_dict"])
+            if training and "optimizer_state_dict" in ckpt:
+                try:
+                    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"[KD Warning] Could not restore optimizer state: {e}")
+            start_epoch = ckpt.get("epoch", 1) + 1
+            best_ur = ckpt.get("best_ur", -1.0)
+            print(f"[KD] Loaded checkpoint {resolved_ckpt} (epoch {start_epoch-1}, best_ur={best_ur:.4f})")
 
     if not training:
         ur, wr, acc, loss, _, _, y_true, y_pred = eval_kd(
@@ -374,18 +479,30 @@ def pipeline_mtkd(teachers, student, train_loader, valid_loader, test_loader,
 
     writer = SummaryWriter(log_dir=os.path.join(save_dir, "tb", default_name))
     use_wandb, wandb_run = _init_wandb(hyperparam, default_name)
+    _track_teacher_artifacts(wandb_run, hyperparam)
 
     start_epoch = 1
     best_ur = -1.0
     epochs_no_improve = 0
 
-    if os.path.isfile(ckpt_path) and training:
-        ckpt = torch.load(ckpt_path, map_location=device)
-        student.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        start_epoch = ckpt.get("epoch", 1) + 1
-        best_ur = ckpt.get("best_ur", -1.0)
-        print(f"[MTKD] Resumed from epoch {start_epoch-1}")
+    resume_target = hyperparam.get("RESUME_CKPT") or (ckpt_path if os.path.isfile(ckpt_path) else None)
+    if resume_target:
+        resolved_ckpt = resolve_checkpoint(
+            resume_target, save_dir=save_dir, wandb_run=wandb_run,
+            default_project=hyperparam.get("WANDB_PROJECT", "mtkd4ser-phase1"),
+            default_entity=hyperparam.get("WANDB_ENTITY"),
+        )
+        if resolved_ckpt and os.path.isfile(resolved_ckpt):
+            ckpt = torch.load(resolved_ckpt, map_location=device)
+            student.load_state_dict(ckpt["model_state_dict"])
+            if training and "optimizer_state_dict" in ckpt:
+                try:
+                    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"[MTKD Warning] Could not restore optimizer state: {e}")
+            start_epoch = ckpt.get("epoch", 1) + 1
+            best_ur = ckpt.get("best_ur", -1.0)
+            print(f"[MTKD] Loaded checkpoint {resolved_ckpt} (epoch {start_epoch-1}, best_ur={best_ur:.4f})")
 
     if not training:
         ur, wr, acc, loss, _, _, y_true, y_pred, *_ = eval_mtkd(

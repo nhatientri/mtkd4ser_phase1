@@ -9,6 +9,7 @@ data.py – Phase 1
 import os
 import json
 import glob
+from typing import cast
 import pandas as pd
 from datasets import Dataset, DatasetDict, Audio, concatenate_datasets, load_from_disk, load_dataset
 from sklearn.model_selection import train_test_split
@@ -58,7 +59,9 @@ def _make_label_maps():
 # IEMOCAP
 # ---------------------------------------------------------------------------
 
-def iemocap(session=1, root=None, create_dev=True, dev_ratio=0.1, seed=42):
+def iemocap(
+    session=1, root=None, create_dev=True, dev_ratio=0.1, seed=42
+) -> tuple[dict[str, int], dict[int, str], DatasetDict]:
     """
     Load one IEMOCAP session (leave-one-session-out style).
     Creates a real dev split from the training speakers (no leakage).
@@ -76,11 +79,11 @@ def iemocap(session=1, root=None, create_dev=True, dev_ratio=0.1, seed=42):
     for hf_p in hf_candidates:
         if os.path.isdir(hf_p):
             print(f"[INFO] Loading IEMOCAP session {session} from HF Arrow: {hf_p}")
-            return label2id, id2label, load_from_disk(hf_p)
+            return label2id, id2label, cast(DatasetDict, load_from_disk(hf_p))
 
     if HF_DATASET_REPO:
         print(f"[INFO] Loading IEMOCAP session {session} from HF Hub: {HF_DATASET_REPO}")
-        return label2id, id2label, load_dataset(HF_DATASET_REPO, f"iemocap_session{session}")
+        return label2id, id2label, cast(DatasetDict, load_dataset(HF_DATASET_REPO, f"iemocap_session{session}"))
     # Expect pre-built json splits (same format as original paper)
     # Fallback: try common Kaggle layout
     train_json = f"{root}/session{session}/train.json"
@@ -154,7 +157,9 @@ def iemocap(session=1, root=None, create_dev=True, dev_ratio=0.1, seed=42):
 # CaFE
 # ---------------------------------------------------------------------------
 
-def cafe(session=1, root=None, create_dev=True, dev_ratio=0.15, seed=42):
+def cafe(
+    session=1, root=None, create_dev=True, dev_ratio=0.15, seed=42
+) -> tuple[dict[str, int], dict[int, str], DatasetDict]:
     """
     Load CaFE (Canadian French).
     Supports direct Arrow zero-copy loading if available.
@@ -172,11 +177,11 @@ def cafe(session=1, root=None, create_dev=True, dev_ratio=0.15, seed=42):
     for hf_p in hf_candidates:
         if os.path.isdir(hf_p):
             print(f"[INFO] Loading CaFE from HF Arrow: {hf_p}")
-            return label2id, id2label, load_from_disk(hf_p)
+            return label2id, id2label, cast(DatasetDict, load_from_disk(hf_p))
 
     if HF_DATASET_REPO:
         print(f"[INFO] Loading CaFE from HF Hub: {HF_DATASET_REPO}")
-        return label2id, id2label, load_dataset(HF_DATASET_REPO, "cafe")
+        return label2id, id2label, cast(DatasetDict, load_dataset(HF_DATASET_REPO, "cafe"))
 
     splits_dir = os.path.join(root, "CaFE_splits")
     if not os.path.isdir(splits_dir):
@@ -252,7 +257,7 @@ def cafe(session=1, root=None, create_dev=True, dev_ratio=0.15, seed=42):
 # FESC (Finnish) – optional
 # ---------------------------------------------------------------------------
 
-def fesc(session=9, root=None):
+def fesc(session=9, root=None) -> tuple[dict[str, int], dict[int, str], DatasetDict]:
     """
     Load FESC if available. Raises a clear error otherwise so the user
     can fall back to EN+FR only.
@@ -309,8 +314,9 @@ def fesc(session=9, root=None):
 # Multilingual concatenation helper
 # ---------------------------------------------------------------------------
 
-def build_multilingual(session_en=1, session_fi=9, session_fr=1,
-                       include_fi=False):
+def build_multilingual(
+    session_en=1, session_fi=9, session_fr=1, include_fi=False
+) -> tuple[dict[str, int], dict[int, str], DatasetDict]:
     """
     Concatenate EN (+ optional FI) + FR.
     Uses pre-built combined HF Arrow dataset if available for Session 1.
@@ -320,15 +326,15 @@ def build_multilingual(session_en=1, session_fi=9, session_fr=1,
     if session_en == 1 and session_fr == 1 and not include_fi:
         if os.path.isdir(hf_comb):
             print(f"[INFO] Loading Combined Multilingual (EN Session 1 + FR Fold 1) from HF Arrow: {hf_comb}")
-            return label2id, id2label, load_from_disk(hf_comb)
+            return label2id, id2label, cast(DatasetDict, load_from_disk(hf_comb))
         elif HF_DATASET_REPO:
             print(f"[INFO] Loading Combined Multilingual from HF Hub: {HF_DATASET_REPO}")
-            return label2id, id2label, load_dataset(HF_DATASET_REPO, "combined")
+            return label2id, id2label, cast(DatasetDict, load_dataset(HF_DATASET_REPO, "combined"))
 
     label2id, id2label, ds_en = iemocap(session=session_en)
     _, _, ds_fr = cafe(session=session_fr)
 
-    datasets = [ds_en, ds_fr]
+    datasets: list[DatasetDict] = [ds_en, ds_fr]
     if include_fi:
         try:
             _, _, ds_fi = fesc(session=session_fi)
@@ -336,9 +342,9 @@ def build_multilingual(session_en=1, session_fi=9, session_fr=1,
         except FileNotFoundError as e:
             print(f"[WARN] FESC unavailable – continuing with EN+FR only.\n{e}")
 
-    train = concatenate_datasets([d["train"] for d in datasets])
-    dev   = concatenate_datasets([d["dev"]   for d in datasets])
-    test  = concatenate_datasets([d["test"]  for d in datasets])
+    train = concatenate_datasets([cast(Dataset, d["train"]) for d in datasets])
+    dev   = concatenate_datasets([cast(Dataset, d["dev"])   for d in datasets])
+    test  = concatenate_datasets([cast(Dataset, d["test"])  for d in datasets])
 
     return label2id, id2label, DatasetDict({
         "train": train, "dev": dev, "test": test
