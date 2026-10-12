@@ -69,57 +69,167 @@ def resolve_checkpoint(path_or_artifact, save_dir="/content/checkpoints",
                        default_entity=None):
     """
     Resolves a checkpoint path. If path_or_artifact is:
-    1. A local file: returns it directly.
-    2. A W&B Artifact URI (e.g. 'entity/project/name:alias', 'name:alias', or 'wandb://...'):
+    1. An existing local file: returns it directly (and links to wandb_run if active).
+    2. A W&B Artifact URI (e.g. 'entity/project/name:alias', 'name:alias', or 'name'):
        downloads it via W&B, links it to wandb_run (for lineage tracking), and returns local .pth file path.
+    3. A non-existent local file path (e.g. '/content/checkpoints/FT_Monolingual_EN_S1.pth'):
+       derives candidate artifact names (e.g. 'FT_Monolingual_EN_S1-best:best') and automatically
+       fetches the remote artifact from W&B.
     """
     if not path_or_artifact:
         return None
 
-    if os.path.isfile(path_or_artifact):
+    # If it's already an existing local file and no wandb_run lineage registration is requested:
+    if os.path.isfile(path_or_artifact) and wandb_run is None:
         return path_or_artifact
 
     clean_ref = str(path_or_artifact).replace("wandb://", "").strip()
 
-    if ":" in clean_ref or "/" in clean_ref or not os.path.exists(clean_ref):
+    # Determine default entity from parameter, run, or environment
+    if not default_entity:
+        if wandb_run is not None and getattr(wandb_run, "entity", None):
+            default_entity = wandb_run.entity
+        else:
+            default_entity = os.environ.get("WANDB_ENTITY") or None
+
+    # Generate candidate artifact references
+    candidates = []
+    if clean_ref.endswith(".pth") or "/" in clean_ref or "\\" in clean_ref:
+        base_name = os.path.splitext(os.path.basename(clean_ref))[0]
+        candidates.extend([
+            f"{base_name}-best:best",
+            f"{base_name}-best:latest",
+            f"{base_name}:best",
+            f"{base_name}:latest",
+            f"model-{base_name}:best",
+            f"model-{base_name}:latest",
+        ])
+    else:
+        if ":" in clean_ref:
+            candidates.append(clean_ref)
+        else:
+            candidates.extend([
+                f"{clean_ref}:best",
+                f"{clean_ref}:latest",
+                clean_ref,
+            ])
+
+    # If file exists locally and we only need to link to active wandb_run:
+    if os.path.isfile(path_or_artifact):
+        if wandb_run is not None:
+            try:
+                for cand in candidates:
+                    linked = False
+                    parts = cand.split("/")
+                    ref_variants = []
+                    if len(parts) == 1:
+                        if default_entity:
+                            ref_variants.append(f"{default_entity}/{default_project}/{cand}")
+                        ref_variants.append(f"{default_project}/{cand}")
+                        ref_variants.append(cand)
+                    elif len(parts) == 2:
+                        if default_entity:
+                            ref_variants.append(f"{default_entity}/{cand}")
+                        ref_variants.append(cand)
+                    else:
+                        ref_variants.append(cand)
+
+                    for r in ref_variants:
+                        try:
+                            wandb_run.use_artifact(r, type="model")
+                            print(f"  ✓ Linked W&B input artifact: {r}")
+                            linked = True
+                            break
+                        except Exception:
+                            continue
+                    if linked:
+                        break
+            except Exception:
+                pass
+        return path_or_artifact
+
+    # Otherwise, download from W&B
+    try:
+        import wandb
+    except ImportError:
+        print(f"[W&B Warning] 'wandb' package not installed; cannot resolve remote checkpoint: {clean_ref}")
+        return path_or_artifact
+
+    api = None
+    if wandb_run is None:
         try:
-            import wandb
-            parts = clean_ref.split("/")
-            if len(parts) == 1:
-                full_ref = f"{default_entity}/{default_project}/{clean_ref}" if default_entity else f"{default_project}/{clean_ref}"
-            elif len(parts) == 2:
-                full_ref = f"{default_entity}/{clean_ref}" if default_entity else clean_ref
-            else:
-                full_ref = clean_ref
+            api = wandb.Api()
+            if not default_entity and hasattr(api, "default_entity") and api.default_entity:
+                default_entity = api.default_entity
+        except Exception:
+            pass
 
-            artifact = None
-            if wandb_run is not None:
-                try:
-                    artifact = wandb_run.use_artifact(full_ref, type="model")
-                    print(f"  ✓ Linked W&B input artifact: {full_ref}")
-                except Exception:
-                    artifact = wandb_run.use_artifact(clean_ref, type="model")
-                    print(f"  ✓ Linked W&B input artifact: {clean_ref}")
-            else:
-                api = wandb.Api()
-                try:
-                    artifact = api.artifact(full_ref, type="model")
-                except Exception:
-                    artifact = api.artifact(clean_ref, type="model")
+    artifact = None
+    resolved_ref = None
 
-            if artifact is not None:
-                _ensure_dir(save_dir)
-                download_dir = artifact.download(root=save_dir)
-                if os.path.isdir(download_dir):
-                    for fname in sorted(os.listdir(download_dir)):
+    for cand in candidates:
+        parts = cand.split("/")
+        ref_variants = []
+        if len(parts) == 1:
+            if default_entity:
+                ref_variants.append(f"{default_entity}/{default_project}/{cand}")
+            ref_variants.append(f"{default_project}/{cand}")
+            ref_variants.append(cand)
+        elif len(parts) == 2:
+            if default_entity:
+                ref_variants.append(f"{default_entity}/{cand}")
+            ref_variants.append(cand)
+        else:
+            ref_variants.append(cand)
+
+        for r in ref_variants:
+            try:
+                if wandb_run is not None:
+                    artifact = wandb_run.use_artifact(r, type="model")
+                    print(f"  ✓ Linked W&B input artifact: {r}")
+                elif api is not None:
+                    artifact = api.artifact(r, type="model")
+                if artifact is not None:
+                    resolved_ref = r
+                    break
+            except Exception:
+                continue
+        if artifact is not None:
+            break
+
+    if artifact is not None:
+        try:
+            _ensure_dir(save_dir)
+            safe_artifact_name = artifact.name.replace(":", "_").replace("/", "_")
+            artifact_dir = os.path.join(save_dir, "artifacts", safe_artifact_name)
+            _ensure_dir(artifact_dir)
+            download_dir = artifact.download(root=artifact_dir)
+
+            pth_file = None
+            if os.path.isdir(download_dir):
+                for root_dir, _, files in os.walk(download_dir):
+                    for fname in sorted(files):
                         if fname.endswith(".pth"):
-                            pth_file = os.path.join(download_dir, fname)
-                            print(f"  ✓ Downloaded W&B checkpoint: {pth_file}")
-                            return pth_file
-                elif os.path.isfile(download_dir):
-                    return download_dir
+                            pth_file = os.path.join(root_dir, fname)
+                            break
+                    if pth_file:
+                        break
+            elif os.path.isfile(download_dir) and download_dir.endswith(".pth"):
+                pth_file = download_dir
+
+            if pth_file and os.path.isfile(pth_file):
+                dest_file = os.path.join(save_dir, os.path.basename(pth_file))
+                if os.path.abspath(pth_file) != os.path.abspath(dest_file):
+                    try:
+                        import shutil
+                        shutil.copy2(pth_file, dest_file)
+                        pth_file = dest_file
+                    except Exception:
+                        pass
+                print(f"  ✓ Downloaded W&B checkpoint: {pth_file} (from {resolved_ref})")
+                return pth_file
         except Exception as e:
-            print(f"[W&B Warning] Could not resolve artifact '{clean_ref}': {e}")
+            print(f"[W&B Warning] Failed to download artifact '{clean_ref}': {e}")
 
     return path_or_artifact
 
