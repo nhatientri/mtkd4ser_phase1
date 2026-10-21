@@ -10,10 +10,10 @@ Usage:
   huggingface-cli login
 
   # 2. Upload Phase 1 datasets (combined, iemocap_session1, cafe):
-  python upload_to_hf.py --repo_id <your-hf-username>/mtkd4ser-phase1
+  python data_prep/upload_to_hf.py --repo_id <your-hf-username>/mtkd4ser-phase1
 
   # To upload all 5 IEMOCAP sessions:
-  python upload_to_hf.py --repo_id <your-hf-username>/mtkd4ser-phase1 --all_sessions
+  python data_prep/upload_to_hf.py --repo_id <your-hf-username>/mtkd4ser-phase1 --all_sessions
 """
 
 import os
@@ -22,7 +22,7 @@ from datasets import load_from_disk
 from huggingface_hub import HfApi, login
 
 
-def upload_datasets(repo_id, hf_dir, all_sessions=False, private=True, token=None):
+def upload_datasets(repo_id, hf_dir, all_sessions=False, private=True, token=None, all_cafe_folds=False):
     if token:
         login(token=token)
 
@@ -48,6 +48,13 @@ def upload_datasets(repo_id, hf_dir, all_sessions=False, private=True, token=Non
             if os.path.isdir(s_path):
                 configs_to_upload.append((s_name, s_path))
 
+    if all_cafe_folds:
+        for f in range(2, 7):
+            f_name = f"cafe_fold{f}"
+            f_path = os.path.join(hf_dir, f_name)
+            if os.path.isdir(f_path):
+                configs_to_upload.append((f_name, f_path))
+
     for config_name, path in configs_to_upload:
         if not os.path.isdir(path):
             print(f"[SKIP] Directory not found: {path}")
@@ -70,7 +77,7 @@ def upload_datasets(repo_id, hf_dir, all_sessions=False, private=True, token=Non
 
 
 def main():
-    _project_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
     _default_hf_dir = os.path.join(_project_dir, "data", "hf_datasets")
 
     parser = argparse.ArgumentParser(description="Upload SER datasets to Hugging Face Hub.")
@@ -84,6 +91,8 @@ def main():
                         help="Set dataset as public (Caution: IEMOCAP requires license, keep private!)")
     parser.add_argument("--all_sessions", action="store_true", default=False,
                         help="Also upload IEMOCAP sessions 2 through 5")
+    parser.add_argument("--all_cafe_folds", action="store_true", default=False,
+                        help="Also upload CaFE folds 2-6 (export them first with export_to_hf_dataset.py --all_cafe_folds)")
     args = parser.parse_args()
 
     upload_datasets(
@@ -92,6 +101,7 @@ def main():
         all_sessions=args.all_sessions,
         private=not args.public,
         token=args.token,
+        all_cafe_folds=args.all_cafe_folds,
     )
 
 

@@ -560,7 +560,7 @@ def create_tarball(out_base_dir, tar_name="data_ser_phase1.tar.gz"):
 
 
 def main():
-    _project_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
     _default_out_dir = os.path.join(_project_dir, "data")
     _default_iemocap = os.environ.get(
         "IEMOCAP_IN",

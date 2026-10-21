@@ -1,43 +1,47 @@
 """
-main.py – Phase 1 entry point (Colab Free friendly)
+main.py – MTKD4SER Phase 1 entry point.
 
-Example commands
-----------------
-# 1. Fine-tune English monolingual teacher
-python main.py --PARADIGM FT --LANGUAGE EN --LINGUALITY Monolingual \
-    --SESSION 1 --N_EPOCHS 15 --BATCH_SIZE 8 --LEARNING_RATE 3e-5 --TRAINING 1
+Examples
+--------
+# 1. Teachers (full wav2vec2-base)
+python main.py --PARADIGM FT --LANGUAGE EN --SESSION 1
+python main.py --PARADIGM FT --LANGUAGE FR --CAFE_FOLD 1
 
-# 2. Fine-tune French monolingual teacher
-python main.py --PARADIGM FT --LANGUAGE FR --LINGUALITY Monolingual \
-    --SESSION 1 --N_EPOCHS 15 --BATCH_SIZE 8 --LEARNING_RATE 3e-5 --TRAINING 1
+# 2. Baseline every MTKD result must beat: multilingual fine-tuning, no teachers
+python main.py --PARADIGM FT --LINGUALITY Multilingual --SESSION 1 --CAFE_FOLD 1
 
-# 3. MTKD with oracle language routing (recommended)
-python main.py --PARADIGM MTKD --LANGUAGE EN --LINGUALITY Multilingual \
-    --SESSION 1 --N_EPOCHS 15 --BATCH_SIZE 4 --LEARNING_RATE 3e-5 --TRAINING 1 \
-    --ROUTING language \
-    --TEACHER_EN_CKPT /content/checkpoints/FT_Monolingual_EN_S1.pth \
-    --TEACHER_FR_CKPT /content/checkpoints/FT_Monolingual_FR_S1.pth
+# 3. MTKD student (same size as the teachers)
+python main.py --PARADIGM MTKD --LINGUALITY Multilingual --ROUTING language \
+    --TEACHER_EN_CKPT checkpoints/FT_Monolingual_EN_S1_wav2vec2-base_seed42.pth \
+    --TEACHER_FR_CKPT checkpoints/FT_Monolingual_FR_F1_wav2vec2-base_seed42.pth
 
-# 4. Ablation: cosine (original paper) vs uniform vs language
-python main.py ... --ROUTING cosine
-python main.py ... --ROUTING uniform
+# 4. Smaller, faster students (teacher logits are cached, so only the student trains)
+python main.py ... --BACKBONE facebook/wav2vec2-base --NUM_LAYERS 4
+python main.py ... --BACKBONE ntu-spml/distilhubert
+
+# 5. Evaluate a saved model
+python main.py --PARADIGM MTKD --LINGUALITY Multilingual --TRAINING 0 --STUDENT_CKPT <path or W&B artifact>
+
+# 6. Compare runs
+python summarize_results.py --SAVE_DIR checkpoints
 """
 
 import os
 import random
-import argparse
-import numpy as np
-from typing import cast
-import torch
-from torch.utils.data import DataLoader, Dataset as TorchDataset
-from transformers import Wav2Vec2FeatureExtractor, AutoFeatureExtractor
-
-from data import iemocap, cafe, fesc, build_multilingual
-from models import model_ft, model_kd, model_mtkd
-from pipeline import pipeline_ft, pipeline_kd, pipeline_mtkd
-from utils import preprocess_function, collate_fn
 import warnings
-warnings.filterwarnings("ignore")
+
+import numpy as np
+import torch
+
+from mtkd4ser.checkpoints import resolve_checkpoint
+from mtkd4ser.config import Config, parse_args, run_name
+from mtkd4ser.data import load_task_dataset, prepare_features
+from mtkd4ser.distill import make_router
+from mtkd4ser.models import build_model, load_model_from_checkpoint
+from mtkd4ser.pipeline import Trainer, compute_teacher_logits
+
+# Silence only known-noisy third-party warnings (not everything)
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
 
 
 def set_seed(seed=42):
@@ -46,184 +50,79 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description="MTKD4SER Phase-1")
-    p.add_argument("--N_EPOCHS", type=int, default=15)
-    p.add_argument("--LEARNING_RATE", type=float, default=3e-5)
-    p.add_argument("--BATCH_SIZE", type=int, default=8)
-    p.add_argument("--SESSION", type=int, default=1)
-    p.add_argument("--TRAINING", type=int, default=1, choices=[0, 1])
-    p.add_argument("--PARADIGM", type=str, default="FT",
-                   choices=["FT", "KD", "MTKD"])
-    p.add_argument("--LANGUAGE", type=str, default="EN",
-                   choices=["EN", "FI", "FR"])
-    p.add_argument("--LINGUALITY", type=str, default="Monolingual",
-                   choices=["Monolingual", "Multilingual"])
-    p.add_argument("--BACKBONE", type=str, default="facebook/wav2vec2-base",
-                   help="e.g. facebook/wav2vec2-base | facebook/wav2vec2-xls-r-300m")
-    p.add_argument("--ROUTING", type=str, default="language",
-                   choices=["language", "uniform", "cosine", "confidence"])
-    p.add_argument("--LAMBDA_KD", type=float, default=0.25)
-    p.add_argument("--TEMPERATURE", type=float, default=5.0)
-    p.add_argument("--COSINE_TAU", type=float, default=0.25)
-    p.add_argument("--PATIENCE", type=int, default=5,
-                   help="Early stopping patience (epochs without validation UR improvement)")
-    default_save_dir = "/content/checkpoints" if os.path.isdir("/content") else "./checkpoints"
-    p.add_argument("--SAVE_DIR", type=str, default=default_save_dir)
-    p.add_argument("--SEED", type=int, default=42)
-    # Teacher checkpoints for KD / MTKD
-    p.add_argument("--TEACHER_CKPT", type=str, default=None,
-                   help="Single teacher for KD")
-    p.add_argument("--TEACHER_EN_CKPT", type=str, default=None)
-    p.add_argument("--TEACHER_FI_CKPT", type=str, default=None)
-    p.add_argument("--TEACHER_FR_CKPT", type=str, default=None)
-    p.add_argument("--INCLUDE_FI", type=int, default=0,
-                   help="1 = try to load FESC in multilingual mode")
-    p.add_argument("--HF_DATASET_REPO", type=str, default=None,
-                   help="Optional Hugging Face dataset repository (e.g. username/mtkd4ser-phase1)")
-    # Weights & Biases experiment tracking
-    p.add_argument("--USE_WANDB", type=int, default=0, choices=[0, 1],
-                   help="1 = enable Weights & Biases experiment tracking")
-    p.add_argument("--WANDB_PROJECT", type=str, default="mtkd4ser-phase1",
-                   help="Weights & Biases project name")
-    p.add_argument("--WANDB_ENTITY", type=str, default=None,
-                   help="Weights & Biases team/entity name")
-    p.add_argument("--WANDB_NAME", type=str, default=None,
-                   help="Custom run name for Weights & Biases")
-    p.add_argument("--WANDB_RUN_ID", type=str, default=None,
-                   help="Existing Weights & Biases Run ID to resume logging into the same dashboard run")
-    p.add_argument("--WANDB_LOG_MODEL", type=int, default=1, choices=[0, 1],
-                   help="1 = upload best checkpoint as a W&B Artifact")
-    p.add_argument("--RESUME_CKPT", type=str, default=None,
-                   help="Path or W&B Artifact URI (e.g. 'entity/project/name:latest') to resume from")
-    return p.parse_args()
+def pick_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _resolve(cfg: Config, ref):
+    return resolve_checkpoint(ref, save_dir=cfg.SAVE_DIR, default_project=cfg.WANDB_PROJECT,
+                              default_entity=cfg.WANDB_ENTITY)
+
+
+def teacher_checkpoints(cfg: Config) -> dict[str, str]:
+    if cfg.PARADIGM == "KD":
+        refs = {"teacher": cfg.TEACHER_CKPT}
+    elif cfg.PARADIGM == "MTKD":
+        refs = {"en": cfg.TEACHER_EN_CKPT, "fr": cfg.TEACHER_FR_CKPT}
+    else:
+        return {}
+    out = {}
+    for key, ref in refs.items():
+        path = _resolve(cfg, ref) if ref else None
+        if not path or not os.path.isfile(path):
+            flag = "--TEACHER_CKPT" if key == "teacher" else f"--TEACHER_{key.upper()}_CKPT"
+            raise FileNotFoundError(f"[{cfg.PARADIGM}] teacher checkpoint for '{key}' not found: {ref!r} ({flag})")
+        out[key] = path
+    return out
 
 
 def main():
-    args = parse_args()
-    set_seed(args.SEED)
+    cfg = parse_args()
+    set_seed(cfg.SEED)
+    if cfg.HF_DATASET_REPO:
+        os.environ["HF_DATASET_REPO"] = cfg.HF_DATASET_REPO
+    hf_repo = cfg.HF_DATASET_REPO or os.environ.get("HF_DATASET_REPO")
 
-    if args.HF_DATASET_REPO:
-        os.environ["HF_DATASET_REPO"] = args.HF_DATASET_REPO
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device} | Backbone: {args.BACKBONE} | Routing: {args.ROUTING}")
+    device = pick_device()
+    print(f"Device: {device} | run: {run_name(cfg)}")
 
     # ------------------------------------------------------------------ data
-    if args.LINGUALITY == "Monolingual":
-        if args.LANGUAGE == "EN":
-            label2id, id2label, ds = iemocap(session=args.SESSION, hf_dataset_repo=args.HF_DATASET_REPO)
-        elif args.LANGUAGE == "FR":
-            label2id, id2label, ds = cafe(session=args.SESSION, hf_dataset_repo=args.HF_DATASET_REPO)
-        else:
-            label2id, id2label, ds = fesc(session=args.SESSION)
-    else:
-        label2id, id2label, ds = build_multilingual(
-            session_en=args.SESSION,
-            session_fi=9,
-            session_fr=1,
-            include_fi=bool(args.INCLUDE_FI),
-            hf_dataset_repo=args.HF_DATASET_REPO,
-        )
+    raw = load_task_dataset(cfg.LINGUALITY, cfg.LANGUAGE, cfg.SESSION, cfg.CAFE_FOLD, hf_repo)
+    print(raw)
+    splits = prepare_features(raw, max_duration=cfg.MAX_DURATION)
 
-    print(ds)
-    print("label2id:", label2id)
+    # ------------------------------------------------------------------ evaluation only
+    if not cfg.TRAINING:
+        ref = cfg.STUDENT_CKPT or os.path.join(cfg.SAVE_DIR, f"{run_name(cfg)}.pth")
+        path = _resolve(cfg, ref)
+        model, _ = load_model_from_checkpoint(path, device, fallback_backbone=cfg.BACKBONE,
+                                              fallback_num_layers=cfg.NUM_LAYERS or None)
+        Trainer(cfg, model, splits, device).test(ckpt_path=path)
+        return
 
-    # ------------------------------------------------------------------ feature extractor
-    try:
-        feature_extractor = AutoFeatureExtractor.from_pretrained(args.BACKBONE)
-    except Exception:
-        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(args.BACKBONE)
+    # ------------------------------------------------------------------ teachers → cached logits
+    teacher_logits, router, cache_sec = None, None, 0.0
+    t_ckpts = teacher_checkpoints(cfg)
+    if t_ckpts:
+        per_teacher = []
+        for path in t_ckpts.values():
+            logits, secs = compute_teacher_logits(path, splits["train"], device, cfg)
+            per_teacher.append(logits)
+            cache_sec += secs
+        teacher_logits = torch.stack(per_teacher, dim=1)                       # (N, K, C)
+        langs = list(t_ckpts.keys())
+        mode = cfg.ROUTING if cfg.PARADIGM == "MTKD" else "uniform"           # KD = 1 teacher
+        router = make_router(mode, langs, cfg.COSINE_TAU, cfg.CONF_TAU)
 
-    encoded = ds.map(
-        lambda ex: preprocess_function(ex, feature_extractor),
-        remove_columns=["audio"],
-        batched=True,
-    )
-
-    train_loader = DataLoader(
-        cast(TorchDataset, encoded["train"]), batch_size=args.BATCH_SIZE, shuffle=True,
-        collate_fn=collate_fn, num_workers=2, pin_memory=True)
-    valid_loader = DataLoader(
-        cast(TorchDataset, encoded["dev"]), batch_size=args.BATCH_SIZE, shuffle=False,
-        collate_fn=collate_fn, num_workers=2)
-    test_loader = DataLoader(
-        cast(TorchDataset, encoded["test"]), batch_size=args.BATCH_SIZE, shuffle=False,
-        collate_fn=collate_fn, num_workers=2)
-
-    num_classes = len(label2id)
-    label_names = [id2label[i] for i in range(num_classes)]
-
-    hyperparam = {
-        "PARADIGM": args.PARADIGM,
-        "SESSION": args.SESSION,
-        "LEARNING_RATE": args.LEARNING_RATE,
-        "BATCH_SIZE": args.BATCH_SIZE,
-        "TRAINING": args.TRAINING,
-        "N_EPOCHS": args.N_EPOCHS,
-        "LINGUALITY": args.LINGUALITY,
-        "LANGUAGE": args.LANGUAGE,
-        "BACKBONE": args.BACKBONE,
-        "SAVE_DIR": args.SAVE_DIR,
-        "PATIENCE": args.PATIENCE,
-        "TEMPERATURE": args.TEMPERATURE,
-        "LAMBDA_KD": args.LAMBDA_KD,
-        "ROUTING": args.ROUTING,
-        "COSINE_TAU": args.COSINE_TAU,
-        "USE_WANDB": args.USE_WANDB,
-        "WANDB_PROJECT": args.WANDB_PROJECT,
-        "WANDB_ENTITY": args.WANDB_ENTITY,
-        "WANDB_NAME": args.WANDB_NAME,
-        "WANDB_RUN_ID": args.WANDB_RUN_ID,
-        "WANDB_LOG_MODEL": args.WANDB_LOG_MODEL,
-        "RESUME_CKPT": args.RESUME_CKPT,
-        "label_names": label_names,
-        "TEACHER_CKPT": args.TEACHER_CKPT,
-        "TEACHER_EN_CKPT": args.TEACHER_EN_CKPT,
-        "TEACHER_FI_CKPT": args.TEACHER_FI_CKPT,
-        "TEACHER_FR_CKPT": args.TEACHER_FR_CKPT,
-    }
-
-    # ------------------------------------------------------------------ models & run
-    from pipeline import resolve_checkpoint
-
-    teacher_ckpt = resolve_checkpoint(args.TEACHER_CKPT, save_dir=args.SAVE_DIR,
-                                      default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
-    teacher_en_ckpt = resolve_checkpoint(args.TEACHER_EN_CKPT, save_dir=args.SAVE_DIR,
-                                         default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
-    teacher_fi_ckpt = resolve_checkpoint(args.TEACHER_FI_CKPT, save_dir=args.SAVE_DIR,
-                                         default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
-    teacher_fr_ckpt = resolve_checkpoint(args.TEACHER_FR_CKPT, save_dir=args.SAVE_DIR,
-                                         default_project=args.WANDB_PROJECT, default_entity=args.WANDB_ENTITY)
-
-    if args.PARADIGM == "FT":
-        model = model_ft(label2id, id2label, num_classes, device, args.BACKBONE)
-        pipeline_ft(model, train_loader, valid_loader, test_loader,
-                    hyperparam, device)
-
-    elif args.PARADIGM == "KD":
-        teacher, student = model_kd(
-            label2id, id2label, num_classes, device,
-            backbone=args.BACKBONE,
-            teacher_ckpt=teacher_ckpt,
-        )
-        pipeline_kd(teacher, student, train_loader, valid_loader, test_loader,
-                    hyperparam, device)
-
-    else:  # MTKD
-        teachers, student = model_mtkd(
-            label2id, id2label, num_classes, device,
-            backbone=args.BACKBONE,
-            teacher_en_ckpt=teacher_en_ckpt,
-            teacher_fi_ckpt=teacher_fi_ckpt,
-            teacher_fr_ckpt=teacher_fr_ckpt,
-        )
-        pipeline_mtkd(teachers, student, train_loader, valid_loader, test_loader,
-                      hyperparam, device)
+    # ------------------------------------------------------------------ student / model
+    model = build_model(cfg.BACKBONE, cfg.NUM_LAYERS or None, device)
+    Trainer(cfg, model, splits, device, teacher_logits, router, cache_sec).fit()
 
 
 if __name__ == "__main__":

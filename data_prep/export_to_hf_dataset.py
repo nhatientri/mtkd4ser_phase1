@@ -15,51 +15,13 @@ Also supports exporting single .parquet files alongside for archival/hub upload.
 """
 
 import os
+import sys
 import argparse
-import pandas as pd
-from datasets import Dataset, DatasetDict, Audio, Features, Value, load_from_disk
+from datasets import DatasetDict, load_from_disk
 
-
-def create_hf_split(csv_path, data_root):
-    """Load a split CSV, resolve full audio paths, and cast to Audio feature."""
-    df = pd.read_csv(csv_path)
-
-    # Ensure path exists by prepending data_root if relative
-    def resolve_audio(p):
-        if os.path.isabs(p) and os.path.isfile(p):
-            return p
-        candidate1 = os.path.join(data_root, p)
-        if os.path.isfile(candidate1):
-            return candidate1
-        fname = os.path.basename(p)
-        for root, _, files in os.walk(data_root):
-            if fname in files:
-                return os.path.join(root, fname)
-        raise FileNotFoundError(f"Audio file not found: {p}")
-
-    df["audio"] = df["audio"].apply(resolve_audio)
-
-    # Convert to standard Python dict
-    cols_to_keep = ["audio", "label", "emotion", "language_id", "speaker_id", "gender"]
-    existing_cols = [c for c in cols_to_keep if c in df.columns]
-    data_dict = {col: df[col].tolist() for col in existing_cols}
-
-    feature_dict = {
-        "audio": Audio(sampling_rate=16_000),
-        "label": Value("int64"),
-    }
-    if "emotion" in existing_cols:
-        feature_dict["emotion"] = Value("string")
-    if "language_id" in existing_cols:
-        feature_dict["language_id"] = Value("int64")
-    if "speaker_id" in existing_cols:
-        feature_dict["speaker_id"] = Value("string")
-    if "gender" in existing_cols:
-        feature_dict["gender"] = Value("string")
-
-    features = Features(feature_dict)
-    ds = Dataset.from_dict(data_dict, features=features)
-    return ds
+# Run as `python data_prep/export_to_hf_dataset.py`: make the repo root importable for `mtkd4ser`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from mtkd4ser.data import create_hf_split  # noqa: E402
 
 
 def export_dataset_dict(split_paths, data_root, output_dir, export_parquet=False):
@@ -105,7 +67,7 @@ def verify_hf_dataset(hf_dir):
 
 
 def main():
-    _project_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
     _default_data_dir = os.path.join(_project_dir, "data")
     _default_out_dir = os.path.join(_default_data_dir, "hf_datasets")
 
@@ -116,6 +78,8 @@ def main():
                         help="Path to output Hugging Face datasets directory")
     parser.add_argument("--export_parquet", action="store_true", default=False,
                         help="Also export .parquet files for backup/hub upload")
+    parser.add_argument("--all_cafe_folds", action="store_true", default=False,
+                        help="Also export CaFE folds 2-6 as cafe_fold2 ... cafe_fold6")
     args = parser.parse_args()
 
     data_dir = args.data_dir
@@ -167,6 +131,16 @@ def main():
         out_cafe = os.path.join(hf_base, "cafe")
         export_dataset_dict(cafe_splits, data_dir, out_cafe, export_parquet=args.export_parquet)
         verify_hf_dataset(out_cafe)
+
+        if args.all_cafe_folds:
+            for fold in range(2, 7):
+                fold_dir = os.path.join(cafe_splits_dir, f"fold{fold}")
+                if not os.path.isdir(fold_dir):
+                    continue
+                print(f"\n  Exporting CaFE fold {fold}...")
+                fold_splits = {s: os.path.join(fold_dir, f"{s}.csv") for s in ("train", "dev", "test")}
+                export_dataset_dict(fold_splits, data_dir, os.path.join(hf_base, f"cafe_fold{fold}"),
+                                    export_parquet=args.export_parquet)
 
     print("\n" + "=" * 60)
     print("ALL HUGGING FACE ARROW DATASETS EXPORTED SUCCESSFULLY!")

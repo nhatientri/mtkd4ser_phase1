@@ -10,21 +10,19 @@ An optimized, language-aware **Multi-Teacher Knowledge Distillation (MTKD)** fra
 
 ---
 
-## Highlights & Innovations
+## Highlights
 
-- **Language-Aware Distillation Routing**: Supports 4 distinct teacher distillation routing mechanisms:
-  - `language` *(Oracle)*: Routes student samples directly to the native-language teacher model using sample metadata (`language_id: 0=EN, 2=FR`).
-  - `uniform`: Balanced baseline weighting across all active teachers ($1/N$).
-  - `cosine`: Dynamic temperature-scaled cosine similarity between student and teacher representations.
-  - `confidence`: Softmax probability confidence routing based on teacher classification entropy.
-- **Dynamic Dual-Teacher Architecture (EN + FR)**:
-  - Dynamically instantiates and computes forward passes only for active teachers (bilingual English + French by default).
-  - Eliminates dummy teacher duplication, saving **~33% training time** and **~380 MB–1.27 GB VRAM**, making larger backbones like `wav2vec2-xls-r-300m` runnable on Google Colab T4.
-- **Zero Speaker Leakage**:
-  - Replaces the historical `dev = test` evaluation flaw with strictly speaker-independent validation splits (LOSO on IEMOCAP and Leave-Two-Speakers-Out on CaFE).
-- **Hugging Face Arrow Integration (Zero-Copy)**:
-  - Preprocesses audio into Hugging Face Apache Arrow tables (`data/hf_datasets/`).
-  - Achieves zero-copy memory mapping (`mmap`), eliminating Google Colab / Google Drive disk I/O bottlenecks during epoch training.
+- **Per-sample language-aware distillation routing** (`--ROUTING`):
+  - `language` *(oracle)*: each clip is distilled only from the teacher of its own language (`language_id`: 0 = EN, 2 = FR).
+  - `uniform`: equal weight on every teacher (1/K).
+  - `cosine`: per-sample cosine similarity between student and teacher logits, softmax over teachers / `COSINE_TAU`.
+  - `confidence`: per-sample teacher confidence (1 − normalised entropy of its prediction), softmax / `CONF_TAU`.
+- **Cached teachers**: teachers are frozen, so their logits are computed once, cached in `SAVE_DIR/teacher_cache/`, and the teachers leave GPU memory before the student trains. An MTKD epoch costs about the same as fine-tuning the student alone, whatever the routing mode.
+- **Any student size**: distillation matches only the 4 output logits, so the student can be smaller than the teachers (`--BACKBONE`, `--NUM_LAYERS`).
+- **Correct padding**: clips are padded per batch with an attention mask, so padding is ignored by attention and by the classifier's mean-pooling.
+- **Per-language evaluation**: dev/test report UR for EN and FR separately; multilingual runs pick their best epoch on the mean per-language dev UR.
+- **Speaker-independent splits**: leave-one-session-out on IEMOCAP, leave-two-speakers-out on CaFE (6 folds).
+- **Efficiency logging**: every run writes `SAVE_DIR/results/<run>.json` (test UR overall/EN/FR, parameters, sec/epoch, samples/s, peak GPU memory, test ms/clip); `summarize_results.py` tabulates them.
 
 ---
 
@@ -32,153 +30,114 @@ An optimized, language-aware **Multi-Teacher Knowledge Distillation (MTKD)** fra
 
 ```
 mtkd4ser_phase1/
-├── notebooks/
-│   └── MTKD4SER_Google_Colab.ipynb # Interactive Colab pipeline notebook
-├── main.py                         # CLI entry point for training and evaluation
-├── data.py                         # Dataset loaders (IEMOCAP, CaFE, Multilingual)
-├── models.py                       # Model factories for FT, Single-KD, and Dynamic MTKD
-├── pipeline.py                     # Training loops, validation checkpointing, early stopping
-├── utils.py                        # Losses, dynamic routing calculations, metrics, collate fn
-├── export_to_hf_dataset.py         # Converts raw WAV/CSV splits to Hugging Face Arrow format
-├── reformat_datasets.py            # Audio resampling (16kHz), 4-class normalization, split generator
-├── requirements.txt                # Pip package dependencies
-├── environment.yml                 # Conda environment definition
-├── .gitignore                      # Git ignore rules (protects data and model checkpoints)
-└── LICENSE                         # MIT Open Source License
+├── main.py                 # CLI entry point: data → (cached teacher logits) → train → test
+├── mtkd4ser/               # library code (imported as `from mtkd4ser.<module> import ...`)
+│   ├── config.py           # Config dataclass; every field is a --FLAG; run naming
+│   ├── constants.py        # labels and language ids (single source of truth)
+│   ├── data.py             # IEMOCAP / CaFE / combined loaders, CSV → HF split, waveform preparation
+│   ├── models.py           # SERModel wrapper (normalisation + attention mask), checkpoint loading
+│   ├── distill.py          # per-sample KD loss and the 4 routers
+│   ├── pipeline.py         # one Trainer for FT / KD / MTKD, teacher-logit cache
+│   ├── checkpoints.py      # checkpoint format/loading, local path or W&B artifact resolution
+│   ├── tracking.py         # W&B run logging (init, teacher lineage, model artifacts, test metrics)
+│   └── utils.py            # collate (padding + mask), metrics (incl. per-language UR)
+├── summarize_results.py    # compare finished runs (accuracy + efficiency)
+├── data_prep/              # one-time dataset preparation (run in this order)
+│   ├── reformat_datasets.py    # raw audio → 16 kHz mono, 4 classes, speaker-independent splits
+│   ├── export_to_hf_dataset.py # CSV splits → Hugging Face Arrow datasets
+│   └── upload_to_hf.py         # push Arrow datasets to a private HF Hub repo
+├── changes/                # CHANGE1.md … CHANGE6.md: change log (design decisions, fixed bugs)
+├── tests/                  # pytest: routing/loss, batching/metrics, split leakage, offline smoke run
+└── notebooks/MTKD4SER_Google_Colab.ipynb
+```
+
+Losses (λ = `LAMBDA_KD`, T = `TEMPERATURE`):
+
+```
+FT    loss = CE
+KD    loss = (1-λ)·CE + λ·T²·KL(teacher ‖ student)
+MTKD  loss = (1-λ)·CE + λ·mean_b Σ_k w[b,k]·T²·KL(teacher_k[b] ‖ student[b])     w from the router
 ```
 
 ---
 
-## Quickstart on Google Colab
+## Installation
 
-You can run the entire pipeline directly in your browser using Google Colab Free:
-
-1. Open [`notebooks/MTKD4SER_Google_Colab.ipynb`](notebooks/MTKD4SER_Google_Colab.ipynb) in Colab.
-2. Select **Runtime > Change runtime type > T4 GPU**.
-3. Follow the step-by-step cells for environment setup, dataset loading, and training.
-
----
-
-## Local Installation
-
-### Prerequisites
-- Python 3.10 or 3.11
-- CUDA 11.8+ / 12.x (for GPU training) or Apple Silicon / CPU
-
-### Using Pip
 ```bash
 git clone https://github.com/username/mtkd4ser_phase1.git
-%cd mtkd4ser_phase1
-pip install -r requirements.txt
-```
-
-### Using Conda
-```bash
-conda env create -f environment.yml
-conda activate ser
+cd mtkd4ser_phase1
+pip install -r requirements.txt        # or: conda env create -f environment.yml && conda activate ser
+python -m pytest -q tests              # unit tests + an offline end-to-end smoke run (~1-2 min on CPU)
 ```
 
 ---
 
 ## Dataset Preparation
 
-This framework evaluates on 4 common emotion classes:
-- `0`: Anger
-- `1`: Happiness (*merged with excitement*)
-- `2`: Neutral
-- `3`: Sadness
-
-### Standard Preprocessing
-To convert raw **IEMOCAP** and **CaFE** audio files into standardized 16 kHz mono WAVs with zero speaker leakage splits:
+4 classes: `0` anger, `1` happiness (+ excitement), `2` neutral, `3` sadness.
 
 ```bash
-python reformat_datasets.py \
-    --iemocap_in /path/to/IEMOCAP_full_release \
-    --cafe_in /path/to/CaFE_48k \
-    --out_dir ./data
+python data_prep/reformat_datasets.py --iemocap_in /path/to/IEMOCAP_full_release --cafe_in /path/to/CaFE_48k --out_dir ./data
+python data_prep/export_to_hf_dataset.py --data_dir ./data --out_dir ./data/hf_datasets [--all_cafe_folds]
+python data_prep/upload_to_hf.py --repo_id <user>/mtkd4ser-phase1 [--all_sessions] [--all_cafe_folds]   # for Colab
 ```
 
-### Export to Hugging Face Arrow (Local Zero-Copy)
-```bash
-python export_to_hf_dataset.py \
-    --data_dir ./data \
-    --out_dir ./data/hf_datasets
-```
-
-### Push to Hugging Face Hub (Cloud-Native Workflow)
-To bypass Google Drive archives entirely and stream data directly to Colab:
-```bash
-# Upload local Arrow datasets to your private Hugging Face repo
-python upload_to_hf.py --repo_id <your-hf-username>/mtkd4ser-phase1
-```
-Then simply pass `--HF_DATASET_REPO <your-hf-username>/mtkd4ser-phase1` to any training command!
+Loaders look for, in order: local Arrow (`data/hf_datasets/`), the reformatted CSV splits, then the HF Hub repo
+(`--HF_DATASET_REPO`). `MTKD_DATA_DIR` overrides the `data/` location.
 
 ---
 
-## Usage Guide
+## Usage
 
-### 1. Train Monolingual Teacher Models
+Run names encode the setup, e.g. `FT_Monolingual_EN_S1_wav2vec2-base_seed42` or
+`MTKD_language_Multilingual_ENFR_S1F1_distilhubert_seed42`. Checkpoints: `SAVE_DIR/<run>.pth` (best) and `<run>_last.pth`.
+A run starts fresh unless you pass `--RESUME 1` or `--RESUME_CKPT <path | W&B artifact>`.
 
-Fine-tune (FT) baseline teachers on English and French datasets:
-
+### 1. Teachers and baselines
 ```bash
-# English Teacher (IEMOCAP Session 1 Fold)
-python main.py --PARADIGM FT --LANGUAGE EN --LINGUALITY Monolingual \
-    --SESSION 1 --N_EPOCHS 12 --BATCH_SIZE 8 --LEARNING_RATE 3e-5 \
-    --TRAINING 1 --SAVE_DIR ./checkpoints
-
-# French Teacher (CaFE Fold 1)
-python main.py --PARADIGM FT --LANGUAGE FR --LINGUALITY Monolingual \
-    --SESSION 1 --N_EPOCHS 12 --BATCH_SIZE 8 --LEARNING_RATE 3e-5 \
-    --TRAINING 1 --SAVE_DIR ./checkpoints
+python main.py --PARADIGM FT --LANGUAGE EN --SESSION 1          # English teacher
+python main.py --PARADIGM FT --LANGUAGE FR --CAFE_FOLD 1        # French teacher
+python main.py --PARADIGM FT --LINGUALITY Multilingual          # multilingual FT baseline (no teachers)
 ```
 
-### 2. Train Multi-Teacher Knowledge Distillation (MTKD)
-
-Distill knowledge into a multilingual student model using active English and French teachers:
-
-#### Oracle Language Routing (Recommended)
+### 2. MTKD
 ```bash
-python main.py --PARADIGM MTKD --LANGUAGE EN --LINGUALITY Multilingual \
-    --SESSION 1 --N_EPOCHS 12 --BATCH_SIZE 6 --LEARNING_RATE 3e-5 \
-    --TRAINING 1 --ROUTING language \
-    --TEACHER_EN_CKPT ./checkpoints/FT_Monolingual_EN_S1.pth \
-    --TEACHER_FR_CKPT ./checkpoints/FT_Monolingual_FR_S1.pth \
-    --INCLUDE_FI 0 --SAVE_DIR ./checkpoints
+python main.py --PARADIGM MTKD --LINGUALITY Multilingual --ROUTING language \
+    --TEACHER_EN_CKPT checkpoints/FT_Monolingual_EN_S1_wav2vec2-base_seed42.pth \
+    --TEACHER_FR_CKPT checkpoints/FT_Monolingual_FR_F1_wav2vec2-base_seed42.pth
+# ablations: --ROUTING uniform | cosine | confidence     language-balanced sampling: --BALANCE_LANG 1
 ```
 
-#### Routing Ablations
-You can switch the `--ROUTING` flag to test different distillation mechanisms:
-- `--ROUTING uniform`: 50% English + 50% French distillation weight.
-- `--ROUTING cosine`: Cosine similarity between student and teacher representations.
-- `--ROUTING confidence`: Weight based on teacher softmax prediction certainty.
+### 3. Smaller students (fast iteration)
 
-### 3. Evaluate a Trained Checkpoint
+| Student | Params | Approx. training compute per clip vs. full student* |
+| :--- | ---: | ---: |
+| `--BACKBONE facebook/wav2vec2-base` | ~95M | 1× |
+| `--BACKBONE facebook/wav2vec2-base --NUM_LAYERS 6` | ~52M | ~0.6× |
+| `--BACKBONE facebook/wav2vec2-base --NUM_LAYERS 4` | ~38M | ~0.45× |
+| `--BACKBONE ntu-spml/distilhubert` | ~24M | ~0.35× |
 
-Evaluate any checkpoint on the speaker-independent test set without training:
+\*Estimated from FLOPs (frozen CNN front-end forward + transformer forward/backward); measure the real numbers with
+`summarize_results.py`. Smaller students usually need a slightly higher learning rate (e.g. 5e-5 – 1e-4).
+Choose routing methods on a small student, then confirm the winner with the full-size one.
 
+### 4. Evaluate and compare
 ```bash
-python main.py --PARADIGM MTKD --LANGUAGE EN --LINGUALITY Multilingual \
-    --SESSION 1 --TRAINING 0 --ROUTING language \
-    --TEACHER_EN_CKPT ./checkpoints/FT_Monolingual_EN_S1.pth \
-    --TEACHER_FR_CKPT ./checkpoints/FT_Monolingual_FR_S1.pth \
-    --INCLUDE_FI 0 --SAVE_DIR ./checkpoints
+python main.py --PARADIGM MTKD --LINGUALITY Multilingual --TRAINING 0 --STUDENT_CKPT <path | W&B artifact>
+python summarize_results.py --SAVE_DIR checkpoints            # one row per run
+python summarize_results.py --SAVE_DIR checkpoints --group    # mean ± std over seeds and folds
 ```
 
----
+For reportable numbers, run all IEMOCAP sessions (`--SESSION 1..5`) and CaFE folds (`--CAFE_FOLD 1..6`) with 2–3 seeds.
 
-## Recommended Batch Sizes (Colab T4 15 GB VRAM)
-
-| Backbone | FT / KD Batch Size | MTKD (2 Teachers: EN + FR) | MTKD (3 Teachers: EN + FI + FR) |
-| :--- | :---: | :---: | :---: |
-| `facebook/wav2vec2-base` | 8 – 16 | 6 – 12 | 4 – 8 |
-| `facebook/wav2vec2-xls-r-300m` | 4 – 8 | 4 – 6 | 2 – 4 |
+### Useful flags
+`--AMP 1` fp16 on CUDA · `--ACCUM_STEPS` gradient accumulation · `--WARMUP_RATIO` · `--MAX_DURATION` clip length cap ·
+`--SELECT_METRIC auto|UR|UR_lang_mean|WR` · `--SAVE_ALL_EPOCHS 1` keep every epoch (≈1.1 GB each for wav2vec2-base) ·
+`--USE_WANDB 1` Weights & Biases logging.
 
 ---
 
 ## Experiment Monitoring
-
-Monitor loss curves, Unweighted Recall (UR), and Weighted Recall (WR) via TensorBoard:
 
 ```bash
 tensorboard --logdir ./checkpoints/tb
