@@ -8,7 +8,7 @@ torchaudio>=2.0.0
 
 # Hugging Face Ecosystem
 transformers>=4.36.0
-datasets>=2.16.0
+datasets>=2.16.0,<4     # 4.x needs torchcodec (matched to torch) to decode audio
 accelerate>=0.26.0
 
 # Audio & Signal Processing

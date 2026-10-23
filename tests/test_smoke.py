@@ -113,6 +113,13 @@ def test_pipeline_end_to_end(env):
         assert r["params_total"] < _results(env, f"FT_Multilingual_ENFR_S1F1_{tag}_seed42")["params_total"]
         assert r["efficiency"]["avg_epoch_train_sec"] is not None
 
+    # a teacher from another fold has seen this run's test speakers → refused before data loading
+    cmd = [sys.executable, os.path.join(PROJECT, "main.py"), "--BACKBONE", env["backbone"], "--SAVE_DIR", env["save"],
+           "--PARADIGM", "MTKD", "--LINGUALITY", "Multilingual", "--CAFE_FOLD", "2",
+           "--TEACHER_EN_CKPT", en, "--TEACHER_FR_CKPT", fr]
+    r = subprocess.run(cmd, env=env["env"], cwd=PROJECT, capture_output=True, text=True)
+    assert r.returncode != 0 and "was trained with CAFE_FOLD=1" in r.stderr, r.stderr[-3000:]
+
     # second run reuses the teacher cache
     out = _run(env, "--PARADIGM", "MTKD", "--LINGUALITY", "Multilingual", "--ROUTING", "language",
                "--NUM_LAYERS", "1", "--TEACHER_EN_CKPT", en, "--TEACHER_FR_CKPT", fr, "--SEED", "7")
@@ -123,6 +130,12 @@ def test_pipeline_end_to_end(env):
     out = _run(env, "--PARADIGM", "MTKD", "--LINGUALITY", "Multilingual", "--TRAINING", "0",
                "--STUDENT_CKPT", student)
     assert "=== TEST" in out
+
+    # fixed time budget (autoresearch): stops on the clock, not N_EPOCHS
+    out = _run(env, "--PARADIGM", "FT", "--LANGUAGE", "FR", "--RUN_NAME", "budget_run",
+               "--TIME_BUDGET_MIN", "0.0005", "--N_EPOCHS", "50", "--PATIENCE", "50")
+    assert "Time budget of" in out
+    assert _results(env, "budget_run")["efficiency"]["epochs_run"] < 50
 
     # resume of a finished run → no training, just test
     _run(env, "--PARADIGM", "FT", "--LANGUAGE", "EN", "--RESUME", "1")

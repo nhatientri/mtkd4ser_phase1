@@ -49,13 +49,23 @@ def load_checkpoint(path, device):
         return torch.load(path, map_location=device)
 
 
+def checkpoint_config(path) -> dict | None:
+    """The training config stored in a checkpoint. Memory-mapped, so the weights are not read."""
+    try:
+        ckpt = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
+    except (TypeError, RuntimeError):  # torch < 2.1, or a legacy (non-zip) checkpoint file
+        ckpt = load_checkpoint(path, "cpu")
+    return ckpt.get("config")
+
+
 # ---------------------------------------------------------------------------
 # Resolution: local path or W&B artifact → local .pth
 # ---------------------------------------------------------------------------
 
 def _candidates(clean_ref: str) -> list[str]:
     """Artifact names to try for a reference (a .pth path is mapped to its run's artifact)."""
-    if clean_ref.endswith(".pth") or "/" in clean_ref or "\\" in clean_ref:
+    is_path = ("/" in clean_ref or "\\" in clean_ref) and ":" not in os.path.basename(clean_ref)
+    if clean_ref.endswith(".pth") or is_path:  # 'project/name:alias' is an artifact, not a path
         base_name = os.path.splitext(os.path.basename(clean_ref))[0]
         return [
             f"{base_name}-best:best",

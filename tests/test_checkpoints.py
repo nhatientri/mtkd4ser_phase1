@@ -2,7 +2,9 @@
 
 import torch
 
-from mtkd4ser.checkpoints import _artifact_refs, _candidates, checkpoint_payload, load_checkpoint, resolve_checkpoint
+from mtkd4ser.checkpoints import (
+    _artifact_refs, _candidates, checkpoint_config, checkpoint_payload, load_checkpoint, resolve_checkpoint,
+)
 
 
 def test_artifact_refs_name_only():
@@ -23,6 +25,17 @@ def test_candidates():
     assert _candidates("/content/checkpoints/r.pth") == pth
     assert _candidates("name:v3") == ["name:v3"]
     assert _candidates("name") == ["name:best", "name:latest", "name"]
+    # project- / entity-qualified artifact refs are passed through, not treated as file paths
+    assert _candidates("proj/r-best:best") == ["proj/r-best:best"]
+    assert _candidates("me/proj/r-best:v2") == ["me/proj/r-best:v2"]
+
+
+def test_checkpoint_config(tmp_path):
+    path = tmp_path / "c.pth"
+    torch.save({"model_state_dict": {}, "config": {"SESSION": 2}}, path)
+    assert checkpoint_config(str(path)) == {"SESSION": 2}
+    torch.save({"model_state_dict": {}}, path)
+    assert checkpoint_config(str(path)) is None
 
 
 def test_resolve_existing_local_file(tmp_path):

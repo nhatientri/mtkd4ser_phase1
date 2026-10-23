@@ -144,9 +144,18 @@ class Trainer:
 
         self.optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                                            lr=cfg.LEARNING_RATE, weight_decay=cfg.WEIGHT_DECAY)
-        steps_per_epoch = math.ceil(len(self.train_loader) / max(cfg.ACCUM_STEPS, 1))
-        total = max(steps_per_epoch * cfg.N_EPOCHS, 1)
-        self.scheduler = get_linear_schedule_with_warmup(self.optimizer, int(cfg.WARMUP_RATIO * total), total)
+        # Fixed time budget (autoresearch): warmup/decay follow elapsed training time, not steps,
+        # so runs with different batch sizes or backbones get the same compute and a full schedule.
+        self.budget_sec = 60.0 * cfg.TIME_BUDGET_MIN
+        self.train_sec = 0.0          # training time used by finished epochs (dev/test eval excluded)
+        self._epoch_t0 = None
+        self.budget_exhausted = False
+        if self.budget_sec > 0:
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lambda _: self._budget_lr_factor())
+        else:
+            steps_per_epoch = math.ceil(len(self.train_loader) / max(cfg.ACCUM_STEPS, 1))
+            total = max(steps_per_epoch * cfg.N_EPOCHS, 1)
+            self.scheduler = get_linear_schedule_with_warmup(self.optimizer, int(cfg.WARMUP_RATIO * total), total)
         try:
             self.scaler = torch.amp.GradScaler("cuda", enabled=self.amp)
         except (AttributeError, TypeError):  # torch < 2.3
@@ -160,6 +169,17 @@ class Trainer:
 
         self.writer = None
         self.wandb_run = None
+
+    # ------------------------------------------------------------------ time budget
+    def _budget_progress(self) -> float:
+        used = self.train_sec + (time.time() - self._epoch_t0 if self._epoch_t0 is not None else 0.0)
+        return min(used / self.budget_sec, 1.0)
+
+    def _budget_lr_factor(self) -> float:
+        p, warm = self._budget_progress(), self.cfg.WARMUP_RATIO
+        if p < warm:
+            return p / warm
+        return max(0.0, (1.0 - p) / max(1.0 - warm, 1e-9))
 
     # ------------------------------------------------------------------ steps
     def _batch_to(self, batch):
@@ -176,7 +196,7 @@ class Trainer:
         y_true, y_pred, langs = [], [], []
         K = self.teacher_logits.shape[1] if self.teacher_logits is not None else 0
         w_sum = torch.zeros(K, device=self.device)
-        n_seen = 0
+        n_seen = n_done = 0
         self.optimizer.zero_grad(set_to_none=True)
 
         n_batches = len(self.train_loader)
@@ -204,6 +224,8 @@ class Trainer:
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scheduler.step()
+                if self.budget_sec > 0 and self._budget_progress() >= 1.0:
+                    self.budget_exhausted = True
 
             tot["loss"] += loss.item()
             tot["loss_ce"] += loss_ce.item()
@@ -211,8 +233,11 @@ class Trainer:
             y_pred += s_logits.argmax(-1).tolist()
             langs += lid.tolist()
             n_seen += len(y)
+            n_done = step + 1
+            if self.budget_exhausted:
+                break
 
-        n = max(n_batches, 1)
+        n = max(n_done, 1)
         out = compute_metrics(y_true, y_pred, langs)
         out.update({k: v / n for k, v in tot.items()})
         out["n_samples"] = n_seen
@@ -269,6 +294,8 @@ class Trainer:
                     obj.load_state_dict(ckpt[key])
                 except Exception as e:
                     print(f"[warn] could not restore {key}: {e}")
+        if self.budget_sec > 0:
+            print("[warn] TIME_BUDGET_MIN with resume: the budget clock restarts from zero.")
         start = int(ckpt.get("epoch", 0)) + 1
         best = float(ckpt.get("best_select", ckpt.get("best_ur", -1.0)))
         no_improve = int(ckpt.get("epochs_no_improve", 0))
@@ -318,10 +345,12 @@ class Trainer:
             if self.device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats()
             _sync(self.device)
-            t0 = time.time()
+            t0 = self._epoch_t0 = time.time()
             tr = self.train_epoch(epoch)
             _sync(self.device)
             secs = time.time() - t0
+            self.train_sec += secs
+            self._epoch_t0 = None
             epoch_secs.append(secs)
             epoch_samples.append(tr["n_samples"])
             if self.device.type == "cuda":
@@ -360,6 +389,9 @@ class Trainer:
                 log_model_artifact(self.wandb_run, self.best_path if is_best else epoch_path, self.name,
                                      epoch, sel, best, cfg.PARADIGM, is_best=is_best)
 
+            if self.budget_exhausted:
+                print(f"Time budget of {cfg.TIME_BUDGET_MIN:g} min used up during epoch {epoch}")
+                break
             if no_improve >= cfg.PATIENCE:
                 print(f"Early stopping at epoch {epoch}")
                 break

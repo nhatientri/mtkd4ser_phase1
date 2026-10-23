@@ -40,6 +40,7 @@ class Config:
     NUM_WORKERS: int = 2
     BALANCE_LANG: int = 0                   # 1 = sample EN and FR equally often (multilingual)
     PATIENCE: int = 5
+    TIME_BUDGET_MIN: float = 0.0            # >0 = stop after this many minutes of training; LR follows time
     SELECT_METRIC: str = "auto"             # auto = UR_lang_mean if dev has >1 language, else UR
     SEED: int = 42
 

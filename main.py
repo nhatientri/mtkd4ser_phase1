@@ -33,7 +33,7 @@ import warnings
 import numpy as np
 import torch
 
-from mtkd4ser.checkpoints import resolve_checkpoint
+from mtkd4ser.checkpoints import checkpoint_config, resolve_checkpoint
 from mtkd4ser.config import Config, parse_args, run_name
 from mtkd4ser.data import load_task_dataset, prepare_features
 from mtkd4ser.distill import make_router
@@ -78,8 +78,34 @@ def teacher_checkpoints(cfg: Config) -> dict[str, str]:
         if not path or not os.path.isfile(path):
             flag = "--TEACHER_CKPT" if key == "teacher" else f"--TEACHER_{key.upper()}_CKPT"
             raise FileNotFoundError(f"[{cfg.PARADIGM}] teacher checkpoint for '{key}' not found: {ref!r} ({flag})")
+        _check_teacher_folds(cfg, key, path)
         out[key] = path
     return out
+
+
+def _data_folds(c: dict) -> dict:
+    """The fold fields that decide which speakers a run trains on."""
+    multi = c.get("LINGUALITY") == "Multilingual"
+    folds = {}
+    if multi or c.get("LANGUAGE") == "EN":
+        folds["SESSION"] = c.get("SESSION")
+    if multi or c.get("LANGUAGE") == "FR":
+        folds["CAFE_FOLD"] = c.get("CAFE_FOLD")
+    return folds
+
+
+def _check_teacher_folds(cfg: Config, key: str, path: str):
+    """A teacher trained on another fold has seen this run's dev/test speakers (leakage)."""
+    t_cfg = checkpoint_config(path)
+    if not t_cfg:
+        print(f"[warn] teacher '{key}' ({path}) stores no config – cannot check that it uses the same folds.")
+        return
+    mine = _data_folds(cfg.to_dict())
+    for field, value in _data_folds(t_cfg).items():
+        if field in mine and mine[field] != value:
+            raise ValueError(f"[{cfg.PARADIGM}] teacher '{key}' ({path}) was trained with {field}={value}, but this "
+                             f"run uses {field}={mine[field]}: its training data contains this run's dev/test "
+                             f"speakers. Use a teacher trained on {field}={mine[field]}.")
 
 
 def main():
@@ -91,6 +117,9 @@ def main():
 
     device = pick_device()
     print(f"Device: {device} | run: {run_name(cfg)}")
+
+    # teachers are resolved and fold-checked before any audio is decoded, so mistakes fail fast
+    t_ckpts = teacher_checkpoints(cfg) if cfg.TRAINING else {}
 
     # ------------------------------------------------------------------ data
     raw = load_task_dataset(cfg.LINGUALITY, cfg.LANGUAGE, cfg.SESSION, cfg.CAFE_FOLD, hf_repo)
@@ -108,7 +137,6 @@ def main():
 
     # ------------------------------------------------------------------ teachers → cached logits
     teacher_logits, router, cache_sec = None, None, 0.0
-    t_ckpts = teacher_checkpoints(cfg)
     if t_ckpts:
         per_teacher = []
         for path in t_ckpts.values():

@@ -133,7 +133,16 @@ For reportable numbers, run all IEMOCAP sessions (`--SESSION 1..5`) and CaFE fol
 ### Useful flags
 `--AMP 1` fp16 on CUDA · `--ACCUM_STEPS` gradient accumulation · `--WARMUP_RATIO` · `--MAX_DURATION` clip length cap ·
 `--SELECT_METRIC auto|UR|UR_lang_mean|WR` · `--SAVE_ALL_EPOCHS 1` keep every epoch (≈1.1 GB each for wav2vec2-base) ·
-`--USE_WANDB 1` Weights & Biases logging.
+`--USE_WANDB 1` Weights & Biases logging · `--TIME_BUDGET_MIN 20` stop after 20 min of training, with warmup/decay
+following the clock instead of `N_EPOCHS` (fixed-compute comparisons, see `changes/CHANGE7.md`).
+
+### Running on Colab from VS Code
+- **Colab VS Code extension** (interactive): open `notebooks/MTKD4SER_Google_Colab.ipynb`, then *Select Kernel → Colab →
+  Auto Connect* with a T4. Colab Secrets (`userdata.get`) do not work in the extension yet, so the auth cells fall back
+  to the `HF_TOKEN` / `WANDB_API_KEY` environment variables and then to a hidden password prompt.
+- **`colab` CLI** (`pip install google-colab-cli`, scripted runs): `colab new -s mtkd --gpu T4`, `colab upload`,
+  `colab exec -s mtkd -f script.py`, `colab stop -s mtkd`. To authenticate the CLI, run
+  `gcloud auth application-default login` with the scopes listed in `colab skill`.
 
 ---
 
